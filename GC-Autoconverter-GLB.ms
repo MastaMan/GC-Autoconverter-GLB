@@ -46,12 +46,21 @@ contrast.bat=
 web-request.bat=
 sketchup-convert.bat=
 template.skp=
+listener-error-observer.ms=
 
 
 [SCRIPT]
 */
 
 heapSize += (1000000 * 40) -- 40Mb
+
+struct listenerObserverWrapper (
+	currentPath = getFileNamePath (getThisScriptFileName()),
+	script = currentPath + "listener-error-observer.ms",
+	fn run = (		
+		try (fileIn script) catch ()
+	)
+)
 
 struct JsonWrapper (
 	/*
@@ -161,7 +170,7 @@ struct JsonWrapper (
 	),
 	
 	fn writeJson fname data = (	
-		deleteFile fname
+		try (deleteFile fname) catch ()
 		
 		-- Force add some data in the end
 		addData data "date" ((dateTime()).getCurrent())
@@ -540,9 +549,14 @@ struct JsonReaderWrapper (
 struct requestWrapper (
 	j = JsonWrapper(),
 	jr = JsonReaderWrapper(),
-	apiUrl = "https://new.greatcatalog.net/autoconvert/api/v1/",
+	a_id = -1,
+	model_id = -1,
+	version_id = -1,
+	slug = "",
+	apiUrl = "https://new.greatcatalog.net/autoconvert/api/v1/", -- !!!!Change new to PROD
 	apiGetQueue = apiUrl  + "queue.php",
-	apiSetStatus = apiUrl  + "status.php",
+	apiPostStatus = apiUrl  + "status.php",
+	apiPostLog = apiUrl  + "log.php",
 	apiKey = "1MMPIyo8sRUACDV9ywqsV1n9gNk4gemGCrmW-L2zZgA",
 	fn downloadString lnk headers: #(#("x-api-key", apiKey)) = (
 		local w = dotNetObject "System.Net.WebClient"
@@ -580,22 +594,15 @@ struct requestWrapper (
 			jr.read lastResponse
 			result = jr.getBool "success"
 		)
-		catch ex (
-			lastError = ex.Message
-			result = false
-		)
-		try (
-			if (client != undefined) do (
-				client.Dispose()
-			)
-		)
-		catch()
+		catch ()
+		
+		try (client.Dispose()) catch()
 		return result
 	),
 	fn getQueue = (
 		return this.downloadString apiGetQueue
 	),
-	fn setStatus id status txt: "" = (
+	fn postStatus status txt: "" = (
 		local s = case status of (
 			#in_progress: status as string
 			#downloaded: status as string
@@ -609,12 +616,29 @@ struct requestWrapper (
 		if (s == #none) do return false
 		
 		local data = #(
-			#("autoconvertion_id", id),
+			#("autoconvertion_id", a_id),
 			#("status_id", s),
 			#("txt", txt)
 		)
 		
-		return this.post apiSetStatus data
+		return this.post apiPostStatus data
+	),
+	fn postAttempt = (
+		local data = #(
+			#("autoconvertion_id", a_id),
+			#("attempt_convertion", true)
+		)
+		
+		return this.post apiPostStatus data
+	),
+	fn postLog txt: "" = (
+		if (txt == "") do return false
+		
+		local data = #(
+			#("autoconvertion_id", a_id),
+			#("txt", txt)
+		)
+		return this.post apiPostLog data
 	)
 )
 
@@ -780,43 +804,115 @@ fn quickLogging msg v: #() error: false = (
 	return p + msg
 )
 
-struct settingsWrapper (
-    pth = getFilenamePath (getThisScriptFilename()),
-    settingsFile = pth + @"settings.ini",
-    fn s k v ss: "SETTINGS" = (
-        setINISetting settingsFile ss k (v as string)
-    ),
-    fn g k type: #string  ss: "SETTINGS" = (
-        local s = getINISetting settingsFile ss k
-        case type of (
-            #int: return s as integer
-            #float: return s as float
-            #bool: if s == "true" or s.count < 1 then true else false
-            #bool_not: if s == "true" then true else false
-            
-            default: return s
-        )
-    ),
-    fn a ss: "SETTINGS" type: #string = (
-        local s = getINISetting settingsFile ss
-        local o = #()
-        
-        for k in s do (
-            local v = g k ss: ss type: type
-            append o #(k, v)
-        )
-        
-        return o
-    ),
-    fn d k ss: "SETTINGS" = (
-        delIniSetting settingsFile ss k
-    )
+struct awsUploaderWrapper (
+	currentPath = getFileNamePath (getThisScriptFileName()),
+	region = "",
+	bucket = "",
+	user = "",
+	key = "",
+	
+	fn upload f = (
+		local n = filenameFromPath f
+		local args = f + ";" + bucket + ";" + region + ";" + n + ";" + user + ";" + key
+		local cmd = "s3-uploader.bat \"" +  args + "\""
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = currentPath
+		HiddenDOSCommand cmd exitCode: &exitcode donotwait: false
+		
+		sysInfo.currentDir = curDir
+	),
+	fn checkCredentialsError = (
+		if (region.count < 5) do return true
+		if (bucket.count < 3) do return true
+		if (user.count < 18) do return true
+		if (key.count < 30) do return true
+		
+		return false
+	)
 )
 
-'@' = settingsWrapper()
+global awsUploaderMgr = awsUploaderWrapper()
 
-fn boost = (
-	if (((maxVersion())[1] / 1000) >= 13) do windows.processPostedMessages() 
+struct settingsWrapper (
+	currScript = getThisScriptFileName(),
+	name = getFilenameFile currScript,
+	pth = getFileNamePath currScript,
+	ini = pth +  sysinfo.username + "@" + sysinfo.computername + ".ini",
+	--ini = (getThisScriptFileName()) + ".ini",
+	sec = name,
+	
+	fn trim s tag: "" = (
+		s as string
+		return (trimLeft (trimRight s tag) tag)
+	),
+	
+	fn add k v sec: "" = (
+		if (sec == "") do sec = this.sec
+		if (v == undefined) do v = ""
+		setIniSetting this.ini sec k (v as string)
+	),
+	
+	fn get k sec: "" type: #string = (
+		if (sec == "") do sec = this.sec
+		
+		if (k == "") do return getINISetting this.ini sec
+		
+		local v = getIniSetting this.ini sec k
+		
+		case type of (
+			#bool_true: return if (v == "true") then true else false
+			#bool_false: return if (v == "false") then false else true
+			#int: return try (v as integer) catch(0)
+			#float: return try (v as float) catch(0.0)
+		)
+		
+		return v
+	),
+	
+	fn del k sec: "" = (
+		if (sec == "") do sec = this.sec
+		delIniSetting ini sec k
+	),	
+	
+	fn delSec s = (
+		delIniSetting ini s
+	)
+)
+
+global '*' = settingsWrapper()
+
+struct utilsWrapper (
+	fn maxVer  = (
+		local v = (maxVersion())[1]
+		v = 2000 + ((v / 1000) - 2)
+		return v
+	),
+	fn boost = (
+		windows.processPostedMessages() 
+	),	
+	fn formatString s v: #() tag: "$" = (
+		for i in 1 to v.count  do (
+			local t = v[i] as string
+			s = substituteString s (tag + i as string) (t)
+		)
+		
+		return s
+	),
+	fn trim s tag: " "= (
+		return trimLeft (trimRight s tag) tag
+	),
+	fn polyCount s = (
+		local iPoly = 0
+		local iVert = 0
+		
+		local a = for i in s collect (getPolygonCount i)
+		for i in a do (
+			iPoly += i[1]
+			iVert += i[2]
+		)
+		
+		return #(iPoly, iVert)
+	)
 )
 
 fn getFileMb f = (
@@ -941,284 +1037,6 @@ fn setRenderByMaterials currentRender = (
 	r = undefined
 	
 	return a
-)
-
-
-
-
-struct BlenderGLBWrapper (
-	currentPath = getFileNamePath (getThisScriptFileName()),
-	pythonScriptGenIni = currentPath + "blender-gen-ini.py",	
-	pythonScriptconvertGLB2Blend = currentPath + "blender-import-glb.py",	
-	pythonScriptZoomExtends = currentPath + "blender-zoom-extends.py",
-	pythonScriptRender = currentPath + "blender-render.py",
-	
-	hdr = currentPath + @"model-viewer\hdri\studio.hdr",
-	blenderLocation = @"C:\Program Files\Blender Foundation\",
-	file = "",	
-	ini = "",
-	zip = "",
-	preview = "",
-	outFile = "",
-	tmpOut = "",
-	json = "",
-	jsonFile = "",
-	j = JsonWrapper(),
-	
-	fn archivate n o = (
-		if (not doesDirectoryExist o) do return false
-		
-		local args = n + ";" + o
-		args = substituteString args "/" @"\"
-		
-		local cmd = "archivate.bat \"" +  args + "\""
-		
-		local curDir = sysInfo.currentDir
-		sysInfo.currentDir = currentPath
-		
-		hiddenDosCommand cmd exitCode: &exitcode donotwait: false
-		
-		sysInfo.currentDir = curDir
-	),	
-	fn getFileMb f = (
-		if (not doesFileExist f) do return 0.0
-		s = (getFileSize f) / 1048576.0
-		return ((s * 100) as integer) / 100.0
-	),
-	fn getBlenderExe = (
-		local d = (getDirectories (blenderLocation + "*"))[1]			
-		if (d == undefined) do return undefined
-		local b = d + "blender.exe"
-		if (not doesFileExist b) do return undefined
-		return b
-	),
-	fn isBlenderExist = (
-		local b = getBlenderExe()
-		if (b == undefined) do return false
-		return true
-	),
-	fn runBatch script = (
-		local f = outFile
-		local b = getBlenderExe()
-		
-		local args = b + ";" + f + ";" + script
-		args = substituteString args "/" @"\"
-		
-		local cmd = "blender-bg-run.bat \"" +  args + "\""
-		
-		local curDir = sysInfo.currentDir
-		sysInfo.currentDir = currentPath
-		
-		hiddenDosCommand cmd exitCode: &exitcode donotwait: false
-		
-		sysInfo.currentDir = curDir
-	),
-	fn runImport script bat: "blender-bg-import.bat" = (
-		local f = file
-		local o = outFile
-		local b = getBlenderExe()
-		
-		local args = b + ";" + script + ";" + f + ";" + o
-		args = substituteString args "/" @"\"
-		
-		local cmd = bat + " \"" +  args + "\""
-		
-		local curDir = sysInfo.currentDir
-		sysInfo.currentDir = currentPath
-		
-		hiddenDosCommand cmd exitCode: &exitcode donotwait: false
-		
-		sysInfo.currentDir = curDir		
-	),	
-	fn contrastImage f = (
-		local curDir = sysInfo.currentDir
-		sysInfo.currentDir = this.currentPath
-		
-		local args = f + ";" + f
-		local cmd = "contrast.bat \"" + args + "\""
-		
-		hiddenDosCommand cmd exitcode:&exitcode			
-		sysInfo.currentDir = curDir
-	),	
-	fn makeRender = (
-		local b = getBlenderExe()
-		
-		local args = b + ";" + this.pythonScriptRender + ";" + this.file + ";" + this.preview + ";" + this.hdr
-		
-		local cmd = "blender-render.bat \"" +  args + "\""
-		
-		local curDir = sysInfo.currentDir
-		sysInfo.currentDir = currentPath
-		
-		hiddenDosCommand cmd exitCode: &exitcode donotwait: false
-		
-		sysInfo.currentDir = curDir
-		
-		this.contrastImage this.preview
-	),
-	fn getRealName = (
-		if (maxFileName != "") do (
-			local n = getFilenameFile maxFileName
-			
-			n = substituteString n "GC-Repack-" ""
-			n = substituteString n "Repack-" ""
-			n = substituteString n "repack-" ""
-			n = substituteString n "GC-" ""
-			n = substituteString n "-Corona" ""
-			n = substituteString n "-VRay" ""
-			n = substituteString n "-V-Ray" ""
-			for i in #{2010..2050} do n = substituteString n (i as string) ""
-			n = substituteString n "---" ""
-			n = substituteString n "---" ""
-			n = substituteString n "--" ""
-			n = substituteString n "--" ""
-			n = trimLeft (trimRight n "- ") "- "			
-			n = "GC-Repack-" + n
-			
-			return n
-		)
-		
-		return undefined
-	),
-	fn makeArchive = (
-		local n = getRealName()
-		local p = getFilenamePath outFile
-		local ext = getFilenameType  outFile
-		
-		if (n != undefined) then (		
-			renameFile outFile (p + n + ext)
-		) else (
-			n = getFilenameFile outFile
-		)
-		
-		archivate zip tmpOut
-		j.addData json "name" (n + ext)				
-		j.addData json "scene" (maxFileName)
-		j.addData json "sizeMb" (getFileMb zip)				
-	),	
-	fn deleteBlenderIni = (
-		deleteFile ini
-	),
-	fn getBlenderData sec: "INDEX" key: undefined = (		
-		if (key != undefined) do (
-			return getINISetting ini sec key
-		)
-		
-		return getINISetting ini sec
-	),
-	fn getDim = (		
-		local w = getBlenderData sec: "DIMENSION" key: "width"
-		local h = getBlenderData sec: "DIMENSION" key: "height"
-		local l = getBlenderData sec: "DIMENSION" key: "length"
-		
-		return w + " x " + l + " x " + h
-	),
-	fn getUnits = (
-		local u = getBlenderData key: "system_units"	
-		u = toLower u
-		u[1] = toUpper u[1]
-		
-		case u of (
-			"Metric": return "Meters"
-			"Imperial": return "Inches"
-		)
-		
-		return u
-	),
-	fn isPackedImages = (
-		return (getBlenderData key: "is_packed_images") == "True"
-	),	
-	fn getTextures = (
-		return getBlenderData sec: "TEXTURES"
-	),
-	fn getPolys = (
-		return getBlenderData key: "polys"
-	),
-	fn getVerts = (
-		return getBlenderData key: "vert"
-	),
-	fn getRender = (
-		local r = getBlenderData key: "render"
-		
-		if (matchpattern r pattern:"BLENDER_RENDER") do return "Blender Render"
-		if (matchpattern r pattern:"CYCLES") do return "Cycles"
-		if (matchpattern r pattern:"EEVEE") do return "Eevee"
-		if (matchpattern r pattern:"BLENDER_EEVEE*") do return "Eevee"
-		if (matchpattern r pattern:"WORKBENCH") do return "Workbench Render"
-		if (matchpattern r pattern:"LUXCORE") do return "LuxCoreRender"
-		if (matchpattern r pattern:"RPR") do return "Radeon ProRender"
-		if (matchpattern r pattern:"RADEON_PRORENDER") do return "Radeon ProRender"
-		if (matchpattern r pattern:"*OCTANE*") do return "OctaneRender"
-		if (matchpattern r pattern:"APPLESEED") do return "Appleseed Render"
-		if (matchpattern r pattern:"*CORONA*") do return "Corona"
-		if (matchpattern r pattern:"*VRAY*") do return "VRay"
-		if (matchpattern r pattern:"*renderman*") do return "RenderMan"
-		if (matchpattern r pattern:"*render_man*") do return "RenderMan"
-		
-		return r
-	),
-	fn getVer = (
-		return getBlenderData key: "blender_ver"		
-	),	
-	fn makeScreenshot = (
-		local f = outFile
-		local b = getBlenderExe()
-		local s = pythonScriptZoomExtends
-		
-		local args = b + ";" + f + ";" + s + ";" + preview
-		args = substituteString args "/" @"\"
-		
-		local cmd = "blender-screenshot.bat \"" +  args + "\""
-		
-		local curDir = sysInfo.currentDir
-		sysInfo.currentDir = currentPath
-		
-		hiddenDosCommand cmd exitCode: &exitcode donotwait: false
-		
-		sysInfo.currentDir = curDir
-		
-		return preview		
-	),
-	fn init glb: "" name: "" = (
-		json = #()
-		
-		local p = getFilenamePath glb
-		local pp = p + name + @"\"		
-		makeDir pp all: true
-		
-		file = glb		
-		preview = p + name + ".png"
-		zip = p + name + ".zip"
-		outFile = pp + name + ".blend"
-		ini = outFile + ".ini"
-		jsonFile = p + name + ".json"
-		tmpOut = pp		
-	),
-	fn generateBlenderIni = (
-		runBatch pythonScriptGenIni
-		
-		local v = getVer()
-		local r = getRender()
-		
-		j.addData json "program" "blender"
-		j.addData json "version" v
-		j.addData json "render" r
-		j.addData json "size" (getDim())
-		j.addData json "polys" (getPolys())
-		j.addData json "verts" (getVerts())
-		j.addData json "units" (getUnits())
-		j.addData json "authorsVersions" #(v)
-		j.addData json "versionsAndRenders" #(#(#(v, r)))
-		
-		deleteBlenderIni()
-	),
-	fn convertGLB2Blend = (
-		runImport pythonScriptconvertGLB2Blend
-		generateBlenderIni()
-	),
-	fn makeJson = (
-		j.writeJson jsonFile json
-	)
 )
 
 struct BlenderGLBWrapper (
@@ -1698,9 +1516,1637 @@ struct SketchupConverterWrapper (
 	)
 )
 
+struct WebGLPlayerWrapper (
+	currentPath = getFilenamePath (getThisScriptFilename()),
+	zippedPlayer = currentPath + "model-viewer.zip",
+	playerPath = currentPath + @"model-viewer\",
+	imgPath =  playerPath + @"images\",	
+	webserver = playerPath + "webserver.bat",
+	port = "33333",
+	localhost = "http://localhost:" + port,
+	urlModelPreview = localhost + "/?model=",
+	urlImgPreview = localhost + "/img-preview.html?id=",
+	
+	fn extractZip f o = (
+        if (f == undefined or not doesFileExist f) do return false
+        if (getFilenameType f != ".zip") do return false
+		
+		local args = f + ";" + o
+		args = substituteString args "/" @"\"
+		
+		local cmd = "start /b /min extract.bat \"" +  args + "\""
+		
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = currentPath
+		
+		hiddenDosCommand cmd exitCode: &exitcode donotwait: true
+		
+		sysInfo.currentDir = curDir
+    ),
+
+	fn makeBrowserScreenshot f s = (
+		local ne = filenameFromPath f
+		local n = getFilenameFile f
+		local destGLB = playerPath + ne
+		
+		deleteFile destGLB
+		copyFile f destGLB
+		
+		curDir = sysInfo.currentDir
+		sysInfo.currentDir = currentPath	
+		
+		local args = (urlModelPreview + ne) + ";" + s
+		local cmd2 = "chrome-screenshot.bat \"" +  args + "\""
+		hiddenDosCommand cmd2 exitcode:&exitcode	
+		
+		sysInfo.currentDir = curDir
+	),
+	
+	fn previewModel f kill: "1" = (	
+		local ne = filenameFromPath f
+		local n = getFilenameFile f
+		local destGLB = playerPath + ne
+		
+		deleteFile destGLB
+		copyFile f destGLB
+		
+		curDir = sysInfo.currentDir
+		sysInfo.currentDir = currentPath	
+		
+		local args = (urlModelPreview + ne) + ";" + kill
+		local cmd = "chrome-preview.bat \"" +  args + "\""
+		hiddenDosCommand cmd exitcode:&exitcode	
+		
+		sysInfo.currentDir = curDir
+	),
+	
+	fn previewImg id kill: "1" type: #web = (				
+		if (type == #local) do (					
+			local ne = filenameFromPath id
+			local n = getFilenameFile id			
+			local destImg = imgPath + ne
+			
+			deleteFile destImg
+			copyFile id destImg
+			id = "/images/" + ne
+		)
+		
+		curDir = sysInfo.currentDir
+		sysInfo.currentDir = currentPath	
+		
+		local args = urlImgPreview + id + ";" + kill
+		local cmd2 = "chrome-preview.bat \"" +  args + "\""
+		hiddenDosCommand cmd2 exitcode:&exitcode	
+		
+		sysInfo.currentDir = curDir
+	),
+	
+	fn startWebServer  = (
+		makeDir imgPath all: true
+		for i in (getFiles (imgPath + "*.*")) do deleteFile i
+		for i in (getFiles (playerPath + "*.glb")) do deleteFile i
+		
+		if (doesFileExist zippedPlayer /*and not doesFileExist webserver*/) do (
+			extractZip	zippedPlayer playerPath
+		)
+		
+		if (not doesFileExist webserver) do return  messageBox "Can't find Model Viwer Player or Webserver, please reinstall script!" title: "Warining!"
+		
+		curDir = sysInfo.currentDir
+		sysInfo.currentDir = playerPath	
+		
+		local args = playerPath + ";" + port
+		local cmd = "start /b /min " + (filenameFromPath webserver) + " \"" +  args + "\""
+		
+		hiddenDosCommand cmd exitcode:&exitcode	
+	),
+	
+	fn run = (
+		startWebServer()
+	)
+)
+
+struct BatchGLBConverterWrapper (
+	selfPath = getFilenamePath (getThisScriptFilename()),
+	texturesQueueNames = #(),
+	normalsQueueNames = #(),
+	texturesQueue = #(),
+	normalsQueue = #(),
+	outPath = "",
+	convertexe = "",
+	json = #(),
+	j = JsonWrapper(),
+	w = WebGLPlayerWrapper(),	
+	
+	fn isValidObject o = (
+		return o.material != undefined and isValidNode o and not isDeleted o and canConvertTo o Editable_mesh
+	),
+	
+	fn getDependents m = (
+		return for r in refs.dependents m where isKindOf r textureMap or isKindOf r Material collect r
+	),
+	
+	fn getRefSlotId m ref out: undefined = (	
+		for i in 1 to getNumSubTexmaps m do (
+			local sm = getSubTexmap m i		
+			if (sm == ref) do return i
+		)
+		
+		return undefined
+	),
+	
+	fn ungroupRecursive = (
+		local s = objects
+		fn tmpUngroup s = (
+			local o = false
+			for i in s where isGroupHead i and isValidNode i do (
+				explodeGroup i
+				o = true
+			)
+			return o
+		)
+		
+		while k != false do k = tmpUngroup s
+	),
+	
+	fn fixGeometry = (
+		local oo = objects as array
+		with redraw off (
+			with undo off (
+				for o in oo where this.isValidObject o do (
+					ResetXForm o
+					convertToMesh o
+					local a = snapshot o
+					a.name = o.name
+					a.wirecolor = o.wirecolor
+					
+					if (classOf a == Editable_Mesh or classOf a == Editable_Poly) do (
+						update a
+					)
+					try(delete o) catch()
+				)
+			)
+		)
+	),
+	
+	fn instnceDuplicateMaps = (
+		local names = #()
+		local maps = #()
+		for i in getClassInstances Bitmaptexture do (
+			if (i.filename == undefined or i.filename == "") do continue
+			local n = toLower (filenameFromPath i.filename)
+			local id = findItem names n
+			if (id == 0) then (
+				append names n
+				maps[names.count] = #(i)
+			) else (
+				appendIfUnique maps[id] i
+			)
+		)
+		
+		for i in maps do (
+			for id in 2 to i.count do (
+				replaceInstances i[id] i[1]
+			)
+		)
+		
+		free names
+		free maps
+	),
+	
+	fn optimizeImages files: #() quality: 90 = (			
+		if (files.count == 0) do return false
+		
+		local jpgoptim = "\"" + this.selfPath + "jpegoptim.exe\""
+		local p = getFilenamePath files[1]
+		makeDir p all: true
+		
+		
+		curDir = sysInfo.currentDir
+		sysInfo.currentDir = p
+		
+		local imgs = ""
+		
+		for i in files do imgs += "\"" + (filenameFromPath i) + "\" "
+		
+		local cmd = jpgoptim + " --strip-all --all-progressive -f -o -q -m" + (quality as string) + "  " + imgs
+		
+		hiddenDosCommand cmd exitcode:&exitcode	
+		
+		sysInfo.currentDir = curDir 
+	),
+	
+	fn deployConvertExe = (
+		local convertexe = this.selfPath + "convert.exe"
+		local tmpDir = @"C:\temp\"
+		local tmpConvertexe = tmpDir + "convert.exe"
+		makeDir tmpDir
+		copyFile convertexe tmpConvertexe
+		return tmpConvertexe
+	),
+	
+	fn convertImageTo f isDelete: true type: #jpg = (		
+		local p = getFilenamePath f
+		local n = getFilenameFile f
+		local ext = getFilenameType f		
+		local exe = this.convertexe
+		
+		local tt = case type of (
+			#png: ".png"
+			default: ".jpg"
+		)
+		
+		local ff = p + n + tt
+		
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = this.selfPath	
+		
+		local cmd = exe + " \"" + f + "\" \"" + ff + "\""									
+		hiddenDosCommand cmd exitcode:&exitcode			
+		sysInfo.currentDir = curDir
+		
+		if (isDelete and ext != tt) do deleteFile f
+		
+		this.optimizeImages files: #(ff)
+		
+		return ff
+	),
+	
+	fn contrastImage f = (
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = this.selfPath
+		
+		local args = f + ";" + f
+		local cmd = "contrast.bat \"" + args + "\""
+		
+		hiddenDosCommand cmd exitcode:&exitcode			
+		sysInfo.currentDir = curDir
+	),
+	
+	fn clampImageColors f = (
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = this.selfPath
+		
+		local args = f + ";" + f
+		local cmd = "clamp-colors.bat \"" + args + "\""
+		
+		
+		hiddenDosCommand cmd exitcode:&exitcode			
+		sysInfo.currentDir = curDir
+	),
+	
+	fn resizeImage f maxSize: 2048 type: #jpg = (
+		local size = maxSize as string + "x" + maxSize as string + @">"
+		
+		local convertexe = this.selfPath + "convert.exe"
+		local tmpDir = @"C:\temp\"
+		local tmpConvertexe = tmpDir + "convert.exe"
+		makeDir tmpDir
+		copyFile convertexe tmpConvertexe
+		
+		local exe = tmpConvertexe
+		
+		if (doesFileExist f and getFileSize f > 0) do return f
+		
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = this.selfPath	
+		
+		local cmd = exe + " \"" + f + "\" -resize \"" + size + "\" \"" + f + "\""									
+		hiddenDosCommand cmd exitcode:&exitcode			
+		sysInfo.currentDir = curDir
+		
+		this.optimizeImages files: #(f)
+		
+		return f	
+	),
+	
+	fn getSceneDir = (
+		local n = this.getSceneName()
+		local p = maxFilePath
+		if (p == "") do p = this.outPath + n + @"\"
+		return p
+	),
+	
+	fn getCacheMapsDir = (
+		local p = (getSceneDir()) + @"_glb_cache\"
+		makeDir p all: true
+		return p
+	),
+	
+	fn getUnusedDirs = (
+		local s = this.getSceneName()		
+		local dd = #()
+		
+		append dd (this.outPath + s + @"\")
+		
+		return dd
+	),
+	
+	fn generateCacheFilename type: #jpg = (
+		local p = this.getCacheMapsDir()
+		local ext = case type of (
+			#png: ".png"
+			default: ".jpg"
+		)
+		
+		return p + "__cache_" + (timeStamp() as string) + ext
+	),
+		
+	fn getCurrentMaxVersion = (
+		local v = maxVersion()
+		v = (v[1] / 1000) - 2
+		
+		return (2000 + v) as string
+	),
+	
+	fn clearCacheMapsDir = (
+		local p = getCacheMapsDir()
+		for i in getFiles (p + "__cache_*.jpg") do deleteFile i
+	),
+	
+	fn getSceneName = (
+		return getFileNameFile maxFileName
+	),
+	
+	fn getMapChannel t = (
+		for i in (getClassInstances Bitmaptexture target: t) do (
+			return try (i.coords.mapChannel) catch (1)
+		)
+		
+		return 1
+	),
+	
+	fn renderTargetMap t size: [2048, 2048] isReplace: true type: #jpg clamp: true = (
+		if (t == undefined) do return undefined
+		
+		local mapChannel = getMapChannel t		
+		local p = this.getCacheMapsDir()
+		makeDir p all: true
+		local f = this.generateCacheFilename type: #png
+		
+		local rm = renderMap t size: size filename: f --display: true  --into: lm
+		rm.gamma = 2.2
+		rm.filename = f		
+		
+		save rm
+		close rm
+		
+		if (type != #png) do (
+			f = this.convertImageTo f type: #jpg
+		)
+		
+		if (clamp) do this.clampImageColors f
+		
+		this.optimizeImages files: #(f)
+		
+		local bt = Bitmaptexture filename: f
+		bt.coords.mapChannel = mapChannel
+		
+		if (isReplace) do replaceInstances t bt
+		
+		return bt 
+	),
+	
+	fn getMapFullPath f = (
+		return mapPaths.getFullFilePath (filenameFromPath f)
+	),
+	
+	fn cacheBitmap t resize: true type: #jpg clamp: true = (
+		local f = t.filename
+		if (f == undefined or f == "") do return undefined
+		local ff = this.generateCacheFilename()
+		f = this.getMapFullPath f
+		
+		copyFile f ff
+		
+		ff = this.convertImageTo ff type: type
+		
+		if (resize) do this.resizeImage ff		
+		if (clamp) do this.clampImageColors ff
+		
+		t.filename = ff
+		
+		if (not doesFileExist ff) do return undefined
+		
+		return t
+	),
+	
+	fn extractBitmapFromSlot m = (
+		local a = getClassInstances Bitmaptexture target: m
+		return a[1]
+	),
+	
+	fn convertBumpToNormal t = (
+		if (t == undefined) do return false
+		
+		local normalmap = this.selfPath + "normalmap.exe"
+		local tmpDir = @"C:\temp\"
+		local tmpNormalmap = tmpDir + "normalmap.exe"
+		makeDir tmpDir
+		copyFile normalmap tmpNormalmap
+		
+		local exe = tmpNormalmap
+		
+		local bt = undefined
+		if (classOf t == Bitmaptexture) then (
+			bt = this.cacheBitmap t type: #png
+		) else (
+			-- If possible extract one bitmap for normal
+			local _tmp = this.extractBitmapFromSlot t
+			if (_tmp == undefined) then (
+				bt = this.renderTargetMap t isReplace: false type: #png
+			) else (
+				bt = this.cacheBitmap _tmp type: #png
+			)
+		)
+		
+		if (bt == undefined) do return false
+		
+		local f = bt.filename
+		local ff = this.generateCacheFilename type: #png
+		
+		local p = getFilenamePath f
+		makeDir p all: true
+		
+		curDir = sysInfo.currentDir
+		sysInfo.currentDir = this.selfPath
+		
+		local cmd = exe + " -i \"" + f + "\" -o \"" + ff + "\""
+		
+		hiddenDosCommand cmd exitcode:&exitcode	
+		
+		sysInfo.currentDir = curDir 
+		
+		local nn = this.convertImageTo ff type: #jpg
+		
+		this.optimizeImages files: #(nn)
+		
+		deleteFile f
+		
+		if (classOf t == Bitmaptexture) then (
+			bt.filename = nn
+			return bt
+		) 
+		
+		return Bitmaptexture filename: nn			
+	),
+	
+	fn addTextureToQueue t = (
+		if (t == undefined) do return false
+		if (classOf t == Bitmaptexture and t.filename != undefined and t.filename != "") do (
+			local n = toLower (filenameFromPath t.filename)
+			local id = findItem this.texturesQueueNames n
+			
+			-- To copy			
+			if (id == 0) then (
+				append texturesQueue #(t)
+				this.texturesQueueNames[this.texturesQueue.count] = n
+				
+				return true
+			) else (
+				return appendIfUnique this.texturesQueue[id] t
+			)
+		)
+	
+		-- To bake
+		-- To bake map, cnt = 1, classOf not Bitmaptex
+		return append this.texturesQueue #(t)
+	),	
+	
+	fn addNormalToQueue t = (
+		if (t == undefined) do return false
+		
+		if (classOf t == CoronaNormal and t.normalMap != undefined) do (
+			local b =  t.normalMap
+			-- Kill CoronaNormal
+			replaceInstances t b
+			return this.addTextureToQueue b
+		) 
+		
+		-- To convert
+		if (classOf t == Bitmaptexture and t.filename != undefined and t.filename != "") do (
+			local n = toLower (filenameFromPath t.filename)
+			local id = findItem this.normalsQueueNames n
+			
+			-- To convert to normal
+			if (id == 0) then (
+				append this.normalsQueue #(t)
+				this.normalsQueueNames[this.normalsQueue.count] = n
+				
+				return true
+			) else (		
+				return appendIfUnique this.normalsQueue[id] t
+			)
+		)
+		
+		-- To bake map and convert to normal, cnt = 1, classOf not Bitmaptex
+		return appendIfUnique normalsQueue #(t)
+	),
+	
+	fn renderNormalsQueue = (
+		for t in this.normalsQueue do (
+			if (classOf t[1] == Bitmaptexture) then (					
+				local n = this.convertBumpToNormal t[1]
+				for i in t where n != false do replaceInstances i n
+			) else (
+				local n = this.convertBumpToNormal t[1]
+				if (n != undefined and n != false) do replaceInstances t[1] n
+			)				
+		)
+	),
+	
+	fn renderTexturesQueue = (			
+		for t in this.texturesQueue do (
+			if (classOf t[1] == Bitmaptexture) then (
+				local b = cacheBitmap t[1]
+				for i in t where i != undefined and b != undefined do replaceInstances i b
+			) else if (t[1] != undefined) then (				
+				this.renderTargetMap t[1] isReplace: true type: #jpg
+			)				
+		)
+	),
+	
+	fn getMaterialsWithFalloff = (
+		local o = #()
+		for i in getClassInstances CoronaPhysicalMtl where i.baseTexmap != undefined do (
+			for ii in getClassInstances Falloff target: i.baseTexmap do (
+				append o i
+				exit
+			)
+		)
+		return o
+	),
+	
+	fn neutralizeMeshSmooth = (
+		local a = #()
+		for i in getClassInstances MeshSmooth do appendIfUnique a i
+		for i in getClassInstances TurboSmooth do appendIfUnique a i
+			
+		for i in a do (
+			if (i.renderIterations > i.iterations) do i.iterations = i.renderIterations
+			try (i.isolineDisplay = false) catch ()
+		)
+	),
+	
+	fn neutralizeRaySwitch = (
+		for i in getClassInstances CoronaRaySwitchMtl do (
+			if (classOf i.giMtl == CoronaPhysicalMtl and i.giMtl.baseTexmap == undefined) then (
+				if (i.directMtl != undefined) then (
+					replaceInstances i i.directMtl
+				) else if (i.reflectMtl != undefined) then (
+					replaceInstances i i.reflectMtl
+				) else if (i.refractMtl != undefined) then (
+					replaceInstances i i.refractMtl
+				) else (
+					replaceInstances i i.giMtl
+				)
+			) else if (i.giMtl != undefined) do (
+				replaceInstances i i.giMtl
+			)
+		)
+	),
+	
+	fn replaceToBlackEmptyBitmap = (
+		for i in getClassInstances Bitmaptexture do (
+			if (i.filename != undefined and i.filename != "") do continue
+			local f = this.generateCacheFilename()
+			local b = bitmap 128 128 color: (color 5 5 5)
+			b.filename = f
+			save b
+			close b
+			
+			i.filename = f
+		)
+	),
+	
+	fn neutralizeCoronaMix = (
+		for i in getClassInstances CoronaMix do (
+			local nm = Mix()
+			nm.name = i.name + "_" + (random 1000 10000) as string
+			
+			nm.mixAmount = i.mixAmount * 100.0
+			nm.mask = i.texmapMix
+			
+			nm.color1 = i.colorTop
+			nm.color2 = i.colorBottom
+			
+			nm.map1 = i.texmapTop
+			nm.map2 = i.texmapBottom
+			
+			replaceInstances i nm
+		)
+	),
+	
+	/* fn neutralizeFalloff = (
+		for i in getClassInstances Falloff do (
+			local nm = Mix()
+			nm.name = i.name
+			
+			nm.mixAmount = 50.0
+			
+			nm.color1 = i.color1
+			nm.color2 = i.color2
+			
+			nm.map1 = i.map1
+			nm.map2 = i.map2
+			
+			if (classOf i.map1 == Bitmaptexture) do (
+				return replaceInstances i i.map1
+			)
+			if (nm.map2 == undefined) do nm.map2 = nm.map1
+			
+			replaceInstances i nm
+		)
+	), */
+	
+	fn neutralizeFalloff = (
+		for f in getClassInstances Falloff do (
+			for m in getDependents f do (
+				local id = getRefSlotId m f
+				if (id == undefined) do continue
+				
+				local nm = f.map1
+				if (nm == undefined) do nm = f.map2
+				
+				setSubTexmap m id nm
+			)
+		)
+	),
+	
+	fn neutralizeDoubleSided = (
+		for i in getClassInstances doubleSided do (
+			local nm = i.material1
+			nm.name = i.name
+			
+			replaceInstances i nm
+		)		 
+	),
+	
+	fn neutralizeNoise = (
+		for i in getClassInstances Noise do (
+			i.color1 = gray
+			i.color2 = gray
+		)
+	),
+	
+	fn neutralizeCoronaSkinMtl = (
+		for i in getClassInstances CoronaSkinMtl do (
+			local nm = CoronaPhysicalMtl()			
+			nm.name = i.name
+			nm.baseColor = i.skinColor
+			nm.baseTexmap = i.texmapSkinColor
+			nm.baseRoughness = 1.0 - i.reflection1Glossiness
+			nm.baseIor = i.reflection1Ior
+			
+			replaceInstances i nm
+		)
+	),
+	
+	fn neutralizeCoronaLayered = (
+		for i in getClassInstances CoronaLayeredMtl do (
+			local nm = i.baseMtl
+			nm.name = i.name
+			
+			replaceInstances i nm
+		)
+	),
+	
+	fn neutralizeBlendMtl = (
+		for i in getClassInstances Blend do (
+			local nm = i.map1
+			nm.name = i.name
+			
+			replaceInstances i nm
+		)
+	),
+	
+	fn neutralizeCoronaAO = (
+		for i in getClassInstances CoronaAO do (
+			i.texmapOccluded = i.texmapUnoccluded
+			i.colorOccluded = color 128 128 128
+			i.colorUnoccluded = i.colorOccluded 
+		)
+	),
+	
+	fn setVrayMtlFogColorToDiffuse = (
+		for i in getClassInstances VRayMtl do (
+			if (i.refraction_fogColor == white) do continue
+			if (i.Refraction == black) do continue
+			
+			i.Diffuse = i.refraction_fogColor
+		)
+	),
+	
+	fn enableGammaCoronaNormal= (
+		for i in getClassInstances CoronaNormal do (
+			i.addGamma = true
+		)
+	),
+	
+	fn normalizeRealWorldUVWbyTiling = (
+		for o in objects do (
+			if (not isValidNode o or isDeleted o or not (canConvertTo o Editable_Mesh) or classOf o.material == undefined) do continue
+			
+			global normalizeBitmaps = #()
+			global normalizeValues = #()
+			global normalizeOffsets = #()
+			
+			fn normalizeMaterialTiling m o id = (
+				local bb = getClassInstances Bitmaptexture target: m
+				if (bb.count == 0) do continue
+				local isRealWorld = try(bb[1].coords.realWorldScale == true) catch (false)
+				
+				try (bb[1].coords.realWorldScale = false) catch ()
+				local u = bb[1].coords.U_Tiling as float
+				local v = bb[1].coords.V_Tiling as float
+				local uOffset = bb[1].coords.U_Offset as float
+				local vOffset = bb[1].coords.V_Offset as float
+				
+				if (u == 1.0 and v == 1.0) do continue
+				
+				local moVolSelect = Vol__Select()
+				moVolSelect.level = 2
+				moVolSelect.volume = 5
+				moVolSelect.matID = id
+				addModifier o moVolSelect
+				
+				local modUvwXForm = UVW_Xform()
+				modUvwXForm.U_Tile = u
+				modUvwXForm.V_Tile = v
+				modUvwXForm.U_Offset = uOffset
+				modUvwXForm.V_Offset = vOffset
+				addModifier o modUvwXForm
+				
+				for b in bb do (
+					try (b.coords.realWorldScale = false) catch ()
+					
+					if (appendifUnique normalizeBitmaps b) do (
+						local _u = b.coords.U_Tiling / u
+						local _v = b.coords.V_Tiling / v
+						local _uOffset = b.coords.U_Offset - uOffset
+						local _vOffset = b.coords.V_Offset - vOffset
+						
+						append normalizeValues #(_u, _v)
+						append normalizeOffsets #(_uOffset, _vOffset)
+					)
+					
+					--b.coords.U_Tiling = b.coords.U_Tiling / u
+					--b.coords.V_Tiling = b.coords.V_Tiling / v
+				)
+			)
+			
+			if (classOf o.material == Multimaterial) then (
+				for id in o.material.materialIDList do (
+					local m = o.material.materialList[id]
+					if (m == undefined) do continue
+					
+					normalizeMaterialTiling m o id
+				)								
+			) else (
+				normalizeMaterialTiling o.material o 1
+			)
+			
+			for i in 1 to normalizeBitmaps.count do (
+				local b = normalizeBitmaps[i]
+				b.coords.U_Tiling = normalizeValues[i][1]
+				b.coords.V_Tiling = normalizeValues[i][2]
+				b.coords.U_Offset = normalizeOffsets[i][1]
+				b.coords.V_Offset = normalizeOffsets[i][2]
+			)
+			
+			convertToMesh o
+		)
+	),
+	
+	fn coronaLightMtlToGltfMaterial = (
+		for i in getClassInstances CoronaLightMtl do (
+			local nm = glTFMaterial()
+			nm.name = i.name
+			
+			nm.emissionColor = i.color
+			nm.emissionMap = i.texmap
+			if (i.opacityTexmap != undefined) do (
+				nm.AlphaMap = i.opacityTexmap
+				this.addTextureToQueue nm.AlphaMap
+				nm.alphaMode = 2
+			)
+			
+			replaceInstances i nm	
+		)
+	),
+	
+	fn clampColor c = (
+		if (c == black) do return color 6 6 6
+		if (c == white) do return color 248 248 248
+		return c
+	),
+	
+	fn isGlass i = (		
+		if (i.refractionAmount >= 0.75 and i.baseRoughness < 0.5) do return true
+		if (MatchPattern i.name pattern: "*glass*") do return true
+		return false
+	),
+	
+	fn coronaPhysicalMtlToGltfMaterial falloffMaterials: #() = (			
+		for i in getClassInstances CoronaPhysicalMtl do (
+			i.roughnessMode = 0
+			local nm = glTFMaterial()
+			nm.name = i.name
+			nm.DoubleSided = false
+			
+			local isUsedFalloff = (findItem falloffMaterials i) != 0
+			local preset = #none
+			
+			if (isUsedFalloff) do preset = #cloth
+			if (this.isGlass i) do preset = #glass			
+			
+			-- Diffuse				
+			if (i.baseTexmap != undefined) then (
+				nm.baseColorMap = i.baseTexmap
+				this.addTextureToQueue nm.baseColorMap
+				
+				if (i.baseLevel != 1.0) do (
+					local c = i.baseLevel * 255.0
+					nm.baseColor = color c c c
+					nm.baseColor = this.clampColor nm.baseColor
+				)
+			) else (
+				nm.baseColor = this.clampColor i.basecolor
+			)
+			
+			-- Roughness
+			nm.roughness = if (i.roughnessMode == 1) then (1.0 - i.baseRoughness) else (i.baseRoughness)
+			if (i.baseRoughnessTexmap != undefined) then (
+				nm.roughnessMap = i.baseRoughnessTexmap
+				this.addTextureToQueue nm.roughnessMap
+				
+				if (nm.roughness == 1) do nm.roughness = 0.75
+			) else if (isUsedFalloff and nm.roughness == 0) do (
+				nm.roughness = 0.75
+			)
+			
+			-- Opacity
+			if (i.opacityTexmap != undefined) do (
+				-- Force bake Alpha (Tiling not supported)
+				local cc = Color_Correction()
+				-- Invert
+				--cc.rewireMode = 2
+				cc.map = i.opacityTexmap
+				nm.AlphaMap = cc
+				this.addTextureToQueue cc
+				nm.alphaMode = 2
+			)
+			
+			local clampNormalMap = 0.2
+			
+			-- Bump
+			nm.normal = i.baseBumpMapAmount
+			if (nm.normal > clampNormalMap) do nm.normal = clampNormalMap
+			if (i.baseBumpTexmap != undefined) do (
+				nm.normalMap = copy i.baseBumpTexmap
+				this.addNormalToQueue nm.normalMap
+			)
+			
+			-- Displace
+			if (i.displacementTexmap != undefined) do (
+				nm.normalMap = copy i.displacementTexmap
+				this.addNormalToQueue nm.normalMap
+				nm.normal = clampNormalMap
+			)
+			
+			-- Metalness
+			nm.metalness_map = i.metalnessTexmap
+			this.addTextureToQueue nm.metalness_map 
+			
+			if (i.metalnessMode == 1) do (
+				nm.metalness = 1
+			)
+			
+			-- IOR
+			nm.enableIndexOfRefraction = true
+			nm.indexOfRefraction = i.baseIor
+			if (i.baseIor < 1.1) do nm.roughness = 1.0
+			
+			-- Self Illumination
+			if (i.selfIllumLevel != 0) do (
+				nm.emissionColor = i.selfIllumColor
+				nm.emissionMap = i.selfIllumTexmap
+				this.addTextureToQueue nm.emissionMap
+			)
+			
+			-- Refraction
+			if (i.refractionAmountTexmap != undefined) then (
+				nm.AlphaMap = i.refractionAmountTexmap
+				this.addTextureToQueue nm.AlphaMap
+				nm.alphaMode = 3
+			) else if (i.refractionAmount != 0) do (
+				local c = (1.0 - i.refractionAmount) * 255.0
+				
+				-- Clamp black color
+				if (c < 30) do c = 30
+				
+				nm.AlphaMap = ColorMap()
+				nm.AlphaMap.solidcolor = color c c c
+				nm.alphaMode = 3
+				
+				this.addTextureToQueue nm.AlphaMap
+			)
+			
+			-- Clearcoat
+			if (i.clearcoatAmount != 0) do (
+				nm.enableClearCoat = true
+				nm.clearcoat = i.clearcoatAmount
+				nm.clearcoatMap = i.clearcoatAmountTexmap
+				this.addTextureToQueue nm.clearcoatMap
+				
+				nm.clearcoatNormal = i.clearcoatBumpMapAmount
+				nm.clearcoatNormalMap = copy i.clearcoatBumpTexmap
+				addNormalToQueue nm.clearcoatNormalMap
+				
+				nm.clearcoatRoughness = i.clearcoatRoughness
+				nm.clearcoatRoughnessMap = i.clearcoatRoughnessTexmap
+				this.addTextureToQueue nm.clearcoatRoughnessMap
+			)
+			
+			-- Sheen
+			if (i.sheenAmount != 0) then (
+				nm.enableSheen = true					
+				nm.sheenColor = i.sheenColor
+				nm.sheenRoughness = i.sheenRoughness
+				nm.sheenColorMap = i.sheenColorTexmap
+				this.addTextureToQueue nm.sheenColorMap
+				
+				nm.sheenRoughnessMap = i.sheenRoughnessTexmap
+				this.addTextureToQueue nm.sheenRoughnessMap
+			)
+			
+			-- Force Clamp Roughness
+			if (nm.roughness > 0.75) do nm.roughness = 0.75
+			
+			-- Force set prams for specific presets
+			if (preset == #cloth) do (
+				nm.normal = 0.25
+				
+				if (i.sheenAmount != 0) do (
+					nm.enableSheen = true
+					nm.sheenRoughness = 0.3
+					nm.sheenColor = color 65 65 65
+					nm.metalness = 0
+				)
+			)
+			
+			if (preset == #glass) do (
+				nm.roughness = 0.15
+				nm.DoubleSided = true
+				nm.enableClearCoat = true
+				nm.clearcoat = 1
+				nm.clearcoatRoughness = 1
+				nm.enableSheen = true
+				nm.sheenRoughness = 0.3
+				nm.sheenColor = color 255 255 255 255
+				nm.indexOfRefraction = 20
+				nm.AlphaMap = ColorMap()
+				nm.AlphaMap.solidcolor = color 110 110 110
+				nm.alphaMode = 3
+				
+				this.addTextureToQueue nm.AlphaMap
+			)
+			
+			
+			-- Replacement
+			replaceInstances i nm				
+		)
+	),
+
+	fn convertToCorona = (
+		::CoronaConverterSuppressGui = true
+		::CoronaConverter 
+		local ff = getFiles (@"c:\Program Files\Corona\Corona Renderer for 3ds Max\" + getCurrentMaxVersion() + @"\Scripts\coronaConverter*.ms")
+		try (fileIn ff[1]) catch ()
+		
+		::CoronaConverter.converterTools.convertCoronaBitmapToBitmap()
+		::CoronaConverter.converterSettings.convertCoronaLegacyMtl = true
+		::CoronaConverter.CoronaConverterRoll.convertCoronaLegacyMtlCheckbox.checked = true
+		
+		::CoronaConverter.convertScene()
+		
+		::CoronaConverterSuppressGui = false
+	),
+	
+	fn autoUnwrap obj = (
+		with redraw off with undo off (
+			select obj
+			max hierarchy mode
+			modPanel.addModToSelection (Unwrap_UVW ()) ui:on
+			subobjectLevel = 3
+			local uvw =  obj.modifiers[1]
+			uvw.setMapChannel 2
+			uvw.setApplyToWholeObject true
+			max modify mode
+			subobjectLevel = 3
+			max select all
+				
+			/*ss = #{}
+			for i in 1 to uvw.numberPolygons() do append ss i
+			uvw.selectPolygons ss*/
+				
+			uvw.flattenMap 50 #([1,0,0], [-1,0,0], [0,1,0], [0,-1,0], [0,0,1], [0,0,-1]) 0.0085 true 2 true true
+			uvw.unwrap4.setThickOpenEdges false
+			
+			max select none
+			subobjectLevel = 0
+			convertToMesh obj  
+		)				
+	),
+	
+	fn attachObjectsByMaterials = (
+		local mats = #()
+		for i in objects where this.isValidObject i do appendIfUnique mats i.material
+		
+		local objsByMats = #()
+		for i in 1 to mats.count do (
+			objsByMats[i] = for o in objects where this.isValidObject o and o.material == mats[i] collect o
+		)
+		
+		for oo in objsByMats where oo.count > 1 do (
+			convertToPoly oo[1]
+			for i in oo.count to 2 by -1 do (
+				polyop.attach oo[1] oo[i]
+				deleteItem oo i
+			)
+		)
+		
+		return for i in objsByMats collect i[1]
+	),
+	
+	fn getDenoisedImage f = (
+		local p = getFilenamePath f
+		local n = getFilenameFile  f
+		local ext = getFilenameType f
+		local d = getFiles (p + n + "_denoised*" + ext)
+		if (d[1] == undefined or not doesFileExist d[1]) do return f
+		return d[1]
+	),
+	
+	fn denoiseImage f = (
+		local v = getCurrentMaxVersion()
+		
+		local args = v + ";" + f
+		args = substituteString args "/" @"\"
+		
+		local cmd = "denoise.bat \"" +  args + "\""
+		
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = this.selfPath
+		
+		hiddenDosCommand cmd exitCode: &exitcode donotwait: false
+		
+		sysInfo.currentDir = curDir	
+	),
+	
+	fn bakeCoronaAO obj filename ao: undefined = (
+		if (ao == undefined) do return false
+		
+		try (convertToMesh obj) catch ()
+		max tool zoomextents
+		max views redraw
+		clearSelection()	
+		select obj
+		
+		local originalMaterial = obj.material
+		
+		local p = getFilenamePath filename
+		local n = getFilenameFile filename
+		local ext = getFilenameType filename
+		
+		makeDir p all: true
+		
+		renderers.current = Corona()
+		local r = renderers.current
+		
+		local tmp_PassesLimit = r.progressive_passLimit
+		r.progressive_passLimit = ao.passes
+		r.denoise_filterType = 4
+		r.denoise_blendAmount = 1.0
+		r.shading_onlyElements = true
+		renderSceneDialog.commit()
+		renderSceneDialog.update()
+		
+		local m = CoronaPhysicalMtl()
+		m.baseColor = white
+		m.baseRoughness = 1.0
+		local cao = CoronaAO()
+		cao.maxDistance = units.decodeValue ao.size
+		cao.colorSpread = 0.022
+		cao.Quality = 64
+		cao.normalMode = 0
+		cao.rayDirectionality = 0.03
+		--cao.occlusionFrom = 3
+		m.baseTexmap = cao
+		obj.material = m
+		
+		obj.iNodeBakeProperties.removeAllBakeElements() 
+		local be = Corona_DiffuseColor()
+		be.outputSzX = be.outputSzY = ao.resolution
+		be.fileType = "jpg"
+		be.filename = filename
+		be.enabled = true
+		be.filter = true
+		obj.INodeBakeProperties.addBakeElement be
+		obj.INodeBakeProperties.bakeEnabled = true
+		obj.INodeBakeProperties.bakeChannel = 2
+		obj.INodeBakeProperties.nDilations = 2
+		select obj
+		
+		render rendertype:#bakeSelected vfb: true progressBar:true outputSize:[ao.resolution, ao.resolution] vfb: false
+		
+		this.optimizeImages files: #(filename)
+		
+		if (ao.denoise) do denoiseImage filename
+		
+		obj.material = originalMaterial
+		r.progressive_passLimit = tmp_PassesLimit
+	),
+	
+	fn getXNormal = (
+		local p = @"c:\Program Files\xNormal\"
+		if (not doesDirectoryExist p) do return undefined
+		local dd = getDirectories (p + "*")
+		local d = dd[dd.count]
+		if (d == undefined) do return undefined
+		
+		local f = d + @"x64\xNormal.exe"
+		if (not doesFileExist f) do return undefined
+		
+		return f
+	),
+	
+	fn xNomralCmd fbx jpg size = (
+		local selfPath = getFileNamePath (getThisScriptFileName())
+			
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = selfPath	
+		
+		local xNormal = this.getXNormal()
+		if (xNormal == undefined) do return false
+		
+		local args = xNormal + ";" + fbx + ";" + jpg + ";" + size
+		local cmd = "xnormal.bat \"" +  args + "\""
+		
+		hiddenDosCommand cmd exitcode:&exitcode	
+		
+		sysInfo.currentDir = curDir
+	),
+	
+	fn bakeXNormalAO obj filename ao: undefined = (
+		if (ao == undefined) do return false
+		
+		local denoise = ao.denoise
+		local res = ao.resolution as string
+		
+		local p = getFilenamePath filename
+		local n = getFilenameFile filename
+		local ext = getFilenameType filename
+		
+		deleteFile filename
+		makeDir p all: true
+		
+		local clone = snapshot obj
+		
+		channelInfo.CopyChannel clone 3 2
+		channelInfo.PasteChannel clone 3 1
+		
+		select clone
+		
+		FbxImporterSetParam "Cameras" false
+		FbxImporterSetParam "Lights" false
+		FbxImporterSetParam "Animation" false
+		FbxExporterSetParam "EmbedTextures" false
+		FbxExporterSetParam "SmoothingGroups" true
+		
+		local nn = "__tmpBakeAO_Mesh_" + (timeStamp() as string) + ".fbx"
+		local f = p + nn
+		
+		exportFile f #noPrompt selectedOnly: true
+		local generatedFile = p + n + "_cavity" + ext
+		deleteFile generatedFile
+		
+		this.xNomralCmd f filename res
+		
+		renameFile generatedFile filename
+		
+		delete clone
+		deleteFile f
+		
+		this.optimizeImages files: #(filename)		
+		if (ao.denoise) do denoiseImage filename
+	),
+	
+	fn setAOmap obj f = (
+		if (f == "" or not doesFileExist f) do return false
+		
+		local d = getDenoisedImage f
+		if (d != undefined) do f = d
+		
+		local b = Bitmaptexture()
+		b.filename = f
+		b.coords.mapChannel = 2
+		b.name = "AO"
+		
+		for i in getClassInstances glTFMaterial target: obj.material do (			
+			i.ambientOcclusionMap = b
+		)
+	),
+	
+	fn createAOmap ao: undefined = (
+		max unhide all
+		local oo = geometry as array
+		for o in oo where this.isValidObject o do (
+			local n = o.material.name
+			o.material = copy o.material
+			o.material.name = n
+			
+			local f = this.generateCacheFilename()
+			
+			this.autoUnwrap o
+			if (ao.type == #corona) do (
+				this.bakeCoronaAO o f ao: ao
+				this.setAOmap o f
+			)
+			
+			if (ao.type == #xnormal) do (
+				this.bakeXNormalAO o f ao: ao
+				this.setAOmap o f
+			)			
+		)
+	),
+	
+	fn rmDir d = (
+		local cmd = "timeout /t 5 /nobreak & rmdir /S /Q \"" + d + "\""
+		HiddenDOSCommand cmd donotwait: true
+	),
+	
+	fn saveGLBScene = (
+		local p = getSceneDir()
+		saveMaxFile (p + "GLB.max") quiet: true
+	),
+	
+	fn packGLTF i o o2 = (
+		local args = i + ";" + o + ";" + o2
+		args = substituteString args "/" @"\"
+		
+		local cmd = "gltfpack.bat \"" +  args + "\""
+		
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = this.selfPath
+		
+		hiddenDosCommand cmd exitCode: &exitcode donotwait: false
+		
+		sysInfo.currentDir = curDir
+		
+		for p in this.getUnusedDirs() do rmDir p
+	),
+	
+	fn exportGLB p n: undefined = (
+		ATSOps.Refresh()
+		select geometry
+		try (unhide selection doLayer: true) catch ()
+		if (n == undefined) do n = this.getSceneName() 
+		local pp = p + n + @"\"
+		makeDir pp all: true
+		local i = pp + n + ".gltf"
+		local o = p + n + ".glb"
+		local o2 = p + n + "-WEBGL.glb"
+		local preview = p + n + ".png"
+		
+		deleteFile o
+		deleteFile o2
+		exportFile i #noPrompt selectedOnly: true
+		deleteFile (i + ".log")
+		
+		packGLTF i o o2
+		
+		-- JSON: Filename
+		this.j.addData this.json "version" (getCurrentMaxVersion())
+		this.j.addData this.json "name" (n + ".glb")
+		-- JSON: Scenename
+		this.j.addData this.json "scene" maxFileName
+		
+		-- Web Preview
+		w.run()
+		w.makeBrowserScreenshot	o preview
+		
+		return o
+		-- Remove ktx2
+		--for i in getFiles (glbFolder + "*.ktx2") do deleteFile i
+	),
+	
+	fn removeExtraObjects = (
+		try (delete lights) catch ()
+		try (delete cameras) catch ()
+		if (VRayFur != undefined) do (
+			local vv = for i in objects where classOf i == VRayFur collect i
+			try (delete vv) catch ()
+		)
+	),
+	
+	fn getFileMb f = (
+		if (not doesFileExist f) do return 0.0
+		s = (getFileSize f) / 1048576.0
+		return ((s * 100) as integer) / 100.0
+	),
+	
+	fn polyCount s = (
+        local iPoly = 0
+		local iVert = 0
+        
+        local a = for i in s collect (getPolygonCount i)
+        for i in a do (
+			iPoly += i[1]
+			iVert += i[2]
+		)
+		
+        sPoly = iPoly as string
+        sVert = iVert as string
+		
+		return #(sPoly, sVert)
+	),
+	
+	fn getDim s = (
+        local d = s.max - s.min
+        
+        d = for i in 1 to 3 collect ((d[i] * 100) as integer / 100.0 ) as string
+        
+        return d[1] + " x " + d[2] + " x " + d[3]
+    ),
+	
+	fn getUnits = (
+        local u = trimLeft (units.SystemType as string) "#"
+        u[1] = toUpper u[1]
+        return u
+    ),
+	
+	fn getMaterialsCnt = (
+		if (glTFMaterial == undefined) do return 0
+		local cc = 0
+		
+		for o in objects do (
+			local c = (getClassInstances glTFMaterial target: o).count
+			cc += c
+		)
+			
+		return cc
+	),
+	
+	fn run out: "" scn: undefined ao: undefined isNormalizeTiling: false = (
+		this.json = #()
+		SetQuietMode true
+		/* 
+			@Input
+			ao = AO_Settings (enabled, passes, resolution, denoise, size)
+			scn = scn (file, path, name, ext, type, del, opened, maxName)
+		*/
+		
+		if (ao == undefined or scn == undefined) do return false
+		this.convertexe = deployConvertExe()
+		ATSOps.Refresh()
+		
+		this.outPath = out
+		this.texturesQueueNames = #()
+		this.normalsQueueNames = #()
+		this.texturesQueue = #()
+		this.normalsQueue = #()
+		
+		-- Normalize Mesh
+		this.ungroupRecursive()
+		this.removeExtraObjects()			
+		this.neutralizeMeshSmooth()
+		this.fixGeometry()
+		this.attachObjectsByMaterials()
+		
+		-- Save Fog color before conversion to Corona
+		this.setVrayMtlFogColorToDiffuse()
+		
+		-- Purge cache
+		this.clearCacheMapsDir()
+		
+		-- @@ Convert all to Corona Physical Mtl
+		this.convertToCorona()
+		
+		-- Bitmap instansing
+		this.instnceDuplicateMaps()
+		
+		local falloffMaterials = this.getMaterialsWithFalloff()
+		
+		-- Simplify maps
+		this.enableGammaCoronaNormal()
+		this.neutralizeFalloff()
+		this.neutralizeCoronaAO()
+		this.neutralizeRaySwitch()
+		this.neutralizeCoronaSkinMtl()
+		this.neutralizeCoronaLayered()
+		this.neutralizeNoise()
+		this.neutralizeBlendMtl()
+		this.neutralizeDoubleSided()
+		this.neutralizeCoronaMix()
+		
+		-- Convert to GLTF Material
+		this.coronaPhysicalMtlToGltfMaterial falloffMaterials: falloffMaterials
+		this.coronaLightMtlToGltfMaterial()
+		
+		-- Tiling to proper mapping	(Kill Tiling)
+		if (isNormalizeTiling) do normalizeRealWorldUVWbyTiling()
+		
+		-- Empty maps to Black!
+		replaceToBlackEmptyBitmap()
+		
+		-- Render Maps
+		this.renderTexturesQueue()	
+		this.renderNormalsQueue()
+		
+		if (ao.enabled) do this.createAOmap ao: ao
+		
+		local o = this.exportGLB out n: scn.name
+		
+		-- JSON: Data		
+		local glbPolys = polyCount objects
+		local glbSize = getFileMb o
+		
+		this.j.addData this.json "program" "glb"
+		this.j.addData this.json "ao" ao.enabled
+		this.j.addData this.json "aoType" ao.type
+		this.j.addData this.json "sizeMb" glbSize
+		this.j.addData this.json "polys" glbPolys[1]
+		this.j.addData this.json "verts" glbPolys[2]		
+		this.j.addData this.json "size" (getDim objects)		
+		this.j.addData this.json "units" (getUnits())
+		this.j.addData this.json "objectsCount" (objects.count)
+		this.j.addData this.json "materialsCount" (getMaterialsCnt())
+		
+		-- Write JSON
+		local jsonFile = out + scn.name + ".json"		
+		this.j.writeJson jsonFile this.json	
+		
+		this.saveGLBScene()	
+		
+		if (scn.del != undefined) do rmDir scn.del
+		
+		SetQuietMode false
+		
+		return o
+	),
+	
+	fn extractZip f o = (
+        if (f == undefined or not doesFileExist f) do return false
+        if (getFilenameType f != ".zip") do return false
+		
+		local args = f + ";" + o
+		args = substituteString args "/" @"\"
+		
+		local cmd = "start /b /min /wait extract.bat \"" +  args + "\""
+		
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = this.selfPath
+		
+		hiddenDosCommand cmd exitCode: &exitcode donotwait: false
+		
+		sysInfo.currentDir = curDir
+    ),
+	
+	fn getMaxFile o = (
+		local ptrns = #(
+			"GC-*-Corona.max",
+			"GC-*-VRay.max",
+			"GC-*.max",
+			"*Corona*.max",
+			"*VRay*.max",
+			"*V-Ray*.max",
+			"*V_Ray*.max",
+			"*crn*.max",
+			"*vr*.max",
+			"*.max"
+		)
+		
+		local files = getFiles (o + "*.max")
+
+		for p in ptrns do (
+			for f in files do (
+				local ne = filenameFromPath f
+				if (MatchPattern ne pattern: p) do return f
+			)
+		)
+		
+		return undefined
+	),
+	
+	fn enableBackFaceCull = (
+		for i in objects do try (i.backfacecull = true) catch ()
+	),
+	
+	fn setMapsVisible = (
+		local classes = #(
+			CoronaPhysicalMtl,
+			CoronaLegacyMtl,
+			VRayMtl
+		)
+		
+		for c in classes where c != undefined do (
+			for i in getClassinstances c do (
+				try (showTextureMap i true) catch ()
+			)	
+		)
+	),
+	
+	fn unfreezeAll = (
+		for i in objects do try (i.isFrozen = false) catch ()
+	),
+	
+	fn unhideAll = (
+		for i in objects do try (i.isHidden = false) catch ()
+	),
+	
+	fn explodeAllGroups = (				
+		local gg = for o in objects where isGroupHead o collect o
+		for g in gg do try (explodeGroup g) catch ()
+	),
+	
+	fn disableIsolineDisplayForSmooth = (
+		for i in getClassInstances MeshSmooth do i.isolineDisplay = false
+		for i in getClassInstances TurboSmooth do i.isolineDisplay = false
+	),
+	
+	fn load f = (
+		sleep 0.1
+		try (resetMaxFile #noprompt) catch ()
+		
+		struct scn (file, path, name, ext, type, del, opened, maxName)
+		local r = scn()
+		
+		SetQuietMode true
+		local ext = getFilenameType f
+		local p = getFilenamePath f
+		local n = getFilenameFile f
+		local nn = filenameFromPath f
+		
+		r.file = f
+		r.path = p
+		r.name = n
+		r.ext = ext
+		r.del = undefined
+		r.opened = false
+		
+		-- For Max files
+		if (ext == ".max") do (
+			loadMaxFile f quiet: true
+			r.type = #max
+			r.opened = maxFileName == nn
+			r.maxName = nn
+			
+			return r
+		)
+		
+		-- For archives
+		local o = p + n + @"\"
+		extractZip f o
+		
+		r.type = #zip
+		r.del = o
+		
+		local m = getMaxFile o		
+		
+		if (m == undefined) do (
+			SetQuietMode false
+			return r
+		)
+		
+		nn = filenameFromPath m
+		r.maxName = nn
+		
+		loadMaxFile m quiet: true
+		SetQuietMode false	
+		r.opened = maxFileName == nn
+		
+		max tool zoomextents
+		max tool maximize
+		unfreezeAll()
+		unhideAll()
+		enableBackFaceCull()
+		--setMapsVisible()
+		max views redraw
+		
+		return r
+	)
+)
+	
+global API_BATCH_GLB_CONVERTER = BatchGLBConverterWrapper()
+
+
+global _rGCAutoGLBConverter_Main = undefined
+global _rGCAutoGLBConverter_Settings = undefined
+global _rGCAutoGLBConverter_About = undefined
 
 try(closeRolloutFloater _fGCAutoGLBConverter) catch()
-global _fGCAutoGLBConverter = newRolloutFloater "" 300 299
+global _fGCAutoGLBConverter = newRolloutFloater "" 300 365
 
 
 fn getLogginFile = (
@@ -1755,14 +3201,17 @@ struct DownloadWrapper (
 	)
 )
 
-rollout _rGCAutoGLBConverter_Main "Main" (
+rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
+	global _MAX_ALLOWED_POLYS = 250000
+	
+	local maxProcessFilesInSession = 20 --20 files in a row
+	local onstartDelay = 20 --sec !!! 20
+	local restartProgramInterval = 60
+	local restartReadReadQueue = 1 -- min !!!!! 5
+	
 	local requestMgr = requestWrapper()
 	local jsonReaderMgr = JsonReaderWrapper()
 	local startupScript = (getDir #userStartupScripts) + @"\AUTO_CONVERTER_GLB_STARTUP.ms"
-	local maxProcessFilesInSession = 20 --20 files in a row
-	local onstartDelay = 1 --sec !!! 20
-	local restartProgramInterval = 60
-	local restartReadReadQueue = 1 -- min !!!!! 5
 	
 	local countdownBeforeStart = onstartDelay
 	local countdownMaxRestart = 60 -- sec
@@ -1773,8 +3222,15 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 		button btnSearchInputPath "..." width: 35 height: 24  align: #right offset: [0, -1]		
 	)
 	
-	checkbox cbxConvertToBlend "Convert to BLEND"
-	checkbox cbxConvertToSketchup "Convert to SKP"
+	group "Additional Conversion" (
+		checkbox cbxConvertToBlend "Convert to BLEND"
+		checkbox cbxConvertToSketchup "Convert to SKP"
+	)
+	
+	group "Settings" (
+		checkbox cbxBakeCoronaAO "Bake Corona AO"
+		checkbox cbxRunListenerErrorObserver "Run Listener Error Observer"
+	)
 	
 	progressBar pbProgress "" height: 9 color: (color 52 168 83) value: 0 offset: [0, 5]
 	label lblStatus "" align: #left offset: [0, 5]
@@ -1798,16 +3254,22 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 	)
 	
 	fn loadSettings = (
-		local p1 = '@'.g "tnt_path"
+		local p1 = '*'.get "edtInputPath"
 		if (p1 != "" and doesDirectoryExist p1) do edtInputPath.text = p1
 		
 		btnStartStartupProcess.enabled = edtInputPath.text != ""			
 		
-		local n = '@'.g "convert_to_blend"
+		local n = '*'.get "cbxConvertToBlend"
 		cbxConvertToBlend.checked = n != "false"
 		
-		local a = '@'.g "convert_to_sketchup"
+		local a = '*'.get "cbxConvertToSketchup"
 		cbxConvertToSketchup.checked = a != "false"
+		
+		local ao = '*'.get "cbxBakeCoronaAO"
+		cbxBakeCoronaAO.checked = ao != "false"
+		
+		local p2 = '*'.get "cbxRunListenerErrorObserver"
+		cbxRunListenerErrorObserver.checked = p2 != "false"
 	)
 	
 	fn updateButtonStatus = (		
@@ -1821,14 +3283,14 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 	)
 	
 	on btnSearchInputPath pressed do (
-		local d = '@'.g "tnt_path"
+		local d = '*'.get "edtInputPath"
 		local p = getSavePath initialDir: d
 		
 		if (p == undefined) do return false
 		p += @"\"
 		
 		edtInputPath.text = p
-		'@'.s "tnt_path" p
+		'*'.add "edtInputPath" p
 		
 		loadSettings()
 	)
@@ -1836,7 +3298,8 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 	fn warnAboutNecessaryOptions = (
 		local opts = #(
 			cbxConvertToBlend,
-			cbxConvertToSketchup
+			cbxConvertToSketchup,
+			cbxBakeCoronaAO
 		)
 		
 		local anyDisabled = false		
@@ -1928,8 +3391,94 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 		tmrQueueRestart.active = true
 	)
 	
+	fn explodeAllGroups = (				
+		local gg = for o in objects where isGroupHead o collect o
+		for g in gg do try (explodeGroup g) catch ()
+	)
+	
+	fn disableIsolineDisplayForSmooth = (
+		for i in getClassInstances MeshSmooth do i.isolineDisplay = false
+		for i in getClassInstances TurboSmooth do i.isolineDisplay = false
+	)
+	
+	fn resetXForAllObjects = (
+		for o in geometry where isValidNode o and not isDeleted o do (
+			ResetXForm o
+			collapseStack o
+		)
+	)
+	
+	fn boxTrick = (
+		local oo = geometry as array
+		
+		for o in oo where isValidNode o do (
+			local b = convertToPoly (box())
+			b.rotation = o.rotation
+			b.name = o.name
+			b.pos = o.pos
+			b.wirecolor = o.wirecolor
+			
+			polyOp.deleteFaces b #{1..6}		
+			polyOp.attach b o
+			convertToMesh b			
+		)
+	)
+	
+	fn setSnenePivotBottom = (
+		MaxOps.pivotMode = #pivotOnly
+		
+		local center = objects.center
+		local bottom = objects.min.z
+		
+		for i in objects do (
+			i.pivot = center
+			i.pivot.z = bottom
+			i.pos = [0, 0, 0]
+		)
+		
+		MaxOps.pivotMode = #none
+	)
+	
+	fn attachSceneObjects = (	
+		local objs = geometry as array
+		if (objs.count < 2) do return false
+		
+		local base = objs[1]
+		try (collapseStack base) catch ()
+		try (convertToPoly base) catch ()
+		base.parent = undefined	
+		
+		for i in objs.count to 2 by -1 do (
+			local o = objs[i]
+			if (o == undefined or not isValidNode o) do continue		
+			try (convertToPoly o) catch ()
+			o.parent = undefined
+			try (polyop.attach base o) catch ()					
+		)
+		
+		CenterPivot base
+		base.wirecolor = gray
+		base.name = getFilenameFile maxFileName
+	)
+	
+	fn checkExistingFiles ff = (
+		local result = 0
+		for f in ff do (
+			if (doesFileExist f) do result += 1
+		)
+		
+		return result
+	)
+	
 	/* PROCESS FILES */
 	fn processFiles = (
+		local isCredentialsError = awsUploaderMgr.checkCredentialsError()
+		if (isCredentialsError) do return false
+		
+		if (cbxRunListenerErrorObserver.checked) do (
+			(listenerObserverWrapper()).run()
+		)
+		
 		local r = false
 		statusMessageRestartQueueIn dispose: true
 		statusMessageRestartMaxIn dispose: true
@@ -1941,16 +3490,15 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 		jr.read q
 		
 		lblStatus.caption = "Get queue..."
-		print "Get queue..."
 		
 		-- Is correct JSON (Restart)
 		local isSuccess = jr.getBool "success"
 		if (not isSuccess) do (	
-			restartProcessFiles msg: "Can't receive request from api. Restart in"
+			restartProcessFiles msg: "Can't retrieve request from API. Restart in"
 			return false
 		)
 		
-		-- Is Queue not empty (Restart)
+		-- Is Queue empty (Restart)
 		if (jr.getString "message" != "queue_item_received") do (
 			restartProcessFiles msg: "Queue is empty. Restart in"		
 			return false
@@ -1961,24 +3509,26 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 		statusMessageScanningWillStart dispose: true
 		
 		lblStatus.caption = "Parse JSON..."
-		print "Parse JSON..."
 		
 		-- Parse JSON
 		local a_id = jr.getString "autoconvertion_id"
 		local model_id = jr.getString "model_id"
 		local version_id = jr.getString "version_id"		
 		local slug = jr.getString "slug"
-		local download_ur = jr.getString "download_url"
+		local download_url = jr.getString "download_url"
 		local status_id = jr.getString "status_id"
 		local source_original_name = jr.getString "source_original_name"
 		local count_total = jr.getInt "count_total"
+		requestMgr.a_id = a_id
+		requestMgr.model_id = model_id
+		requestMgr.version_id = version_id
+		requestMgr.slug = slug				
 		
+		requestMgr.postLog txt: "Update status to In Progress.."		
 		lblStatus.caption = "Update status to In Progress..."
-		print "Update status to In Progress..."
 		
 		-- Set Status: in_progress
-		r = requestMgr.setStatus a_id #in_progress txt: (slug + " file in progress!")
-		
+		requestMgr.postStatus #in_progress txt: (slug + " file in progress!")
 		
 		local downloadMgr = DownloadWrapper()
 		local guid = genGUID()
@@ -1986,32 +3536,164 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 		local file = d + fname
 		-- Clear all files in folder
 		lblStatus.caption = "Clear folder..."
-		print "Clear folder..."
 		clearFolder d
 		
 		-- Download file
+		requestMgr.postLog txt: "Downloading file.."
 		lblStatus.caption = "Downloading file..."
-		print "Downloading file..."
 		
-		downloadMgr.download download_ur file
+		downloadMgr.download download_url file
 		
+		requestMgr.postLog txt: "File downloaded, validate file"
 		lblStatus.caption = "File downloaded..."
-		print "File downloaded..."
+		
+		-- !!! uncomment this
+		-- Tell that we try conversion
+		--requestMgr.postAttempt()
 		
 		-- Is file not valid immediately request next file
 		if (not downloadMgr.isValidFile file) do (
-			r = requestMgr.setStatus a_id #error txt: ("File not downloaded: " + slug + "!")
+			requestMgr.postLog txt: "File not valid!"
+			requestMgr.postStatus #error txt: ("File not valid: " + slug + "!")
+			lblStatus.caption = "File not downloaded..."
 			processFiles()
 			return false
 		)
 		
-		r = requestMgr.setStatus a_id #downloaded txt: ("File downloaded: " + slug + "!")
+		requestMgr.postLog txt: ("File downloaded: " + slug + "!")
+		requestMgr.postStatus #downloaded txt: ("File downloaded: " + slug + "!")
+		
+		local blendGLBMgr = BlenderGLBWrapper()
+		local skpMgr = SketchupConverterWrapper()
+		
+		SceneConverter.BackupOriginalFiles = false
+		SetQuietMode true
+		escapeEnable = true
+		clearListener()
+		
+		struct AO_Settings (enabled, passes, resolution, denoise, size, type)
+		local ao = AO_Settings()
+		ao.enabled = cbxBakeCoronaAO.checked
+		ao.size = (::_rGCAutoGLBConverter_Settings.spnAOSize.value as string) + "cm"
+		ao.passes = ::_rGCAutoGLBConverter_Settings.spnAOPasses.value
+		ao.resolution = ::_rGCAutoGLBConverter_Settings.spnAOResolution.value
+		ao.denoise = ::_rGCAutoGLBConverter_Settings.cbxAODenoise.checked
+		ao.type = #corona
+		
+		lblStatus.caption = "Unzip and loading scene..."
+		requestMgr.postLog txt: ("Unzip and loading scene...")
+		local r = ::API_BATCH_GLB_CONVERTER.load file
+		
+		if (not r.opened) do (
+			clearFolder d
+			requestMgr.postLog txt: ("[Error] Can't open scene file!")
+			requestMgr.postStatus #error txt: ("Can't open scene file!")
+			lblStatus.caption = "Can't open scene file..."
+			processFiles()
+			return false
+		)
+		
+		local polys = (utilsWrapper()).polyCount objects
+		if (polys[1] >= _MAX_ALLOWED_POLYS) do (
+			requestMgr.postLog txt: ("[Error] The polygon count exceeds the allowed limit!")
+			requestMgr.postStatus #error txt: ("The polygon count exceeds the allowed limit: " + _MAX_ALLOWED_POLYS as string)
+			lblStatus.caption = "Too much polygons, skiping!"
+			processFiles()
+			return false			
+		)
+		
+		lblStatus.caption = "Fix scene: BoxTrick, Attach All, Set Pivot..."
+		requestMgr.postLog txt: "Fix scene: BoxTrick, Attach All, Set Pivot..."
+		
+		explodeAllGroups()
+		disableIsolineDisplayForSmooth()
+		boxTrick()
+		resetXForAllObjects()
+		attachSceneObjects()
+		setSnenePivotBottom()
+		
+		r.name = slug + "-GLB"
+		
+		local expectedExitFiles = #(
+			d + slug + "-GLB.glb",
+			d + slug + "-GLB.png",
+			d + slug + "-GLB.json",
+			d + slug + "-GLB-WEBGL.glb"
+		)
+		
+		lblStatus.caption = "Convert to GLB..."
+		requestMgr.postLog txt: "Convert to GLB..."
+		local glb = ::API_BATCH_GLB_CONVERTER.run scn: r out: d ao: ao isNormalizeTiling: false
+		
+		-- Convert to Blender
+		if (cbxConvertToBlend.checked) do (
+			if (blendGLBMgr.isBlenderExist()) then (
+				lblStatus.caption = "Convert to Blender..."
+				requestMgr.postLog txt: "Convert to Blender..."
+				
+				blendGLBMgr.init glb: glb name: (slug + "-BLEND")
+				join expectedExitFiles #(
+					d + slug + "-BLEND.zip",
+					d + slug + "-BLEND.json",
+					d + slug + "-BLEND.png"
+				)
+				
+				blendGLBMgr.convertGLB2Blend()
+				--blendGLBMgr.makeScreenshot()
+				blendGLBMgr.makeRender()
+				blendGLBMgr.makeArchive()
+				blendGLBMgr.makeJson()
+			) else (
+				requestMgr.postLog txt: ("[Error] Option convert to Blender selected but program not found!")
+			)			
+		)
+		
+		-- Convert to Sketchup
+		if (cbxConvertToSketchup.checked) do (
+			if (skpMgr.isSketchupExist()) then (
+				lblStatus.caption = "Converting to Sketchup..."
+				requestMgr.postLog txt: "Converting to Sketchup..."
+				
+				skpMgr.init name: (slug + "-SKP") glb: glb
+				join expectedExitFiles #(
+					d + slug + "-SKP.zip",
+					d + slug + "-SKP.json"
+				)
+				
+				skpMgr.convertMax2Skp()	
+				skpMgr.makeJson()	
+			) else (
+				requestMgr.postLog txt: ("[Error] Option convert to Sketchup selected but program not found!")
+			)			
+		)
+		
+		local cntExistingFiles = checkExistingFiles expectedExitFiles
+		if (cntExistingFiles != expectedExitFiles.count) then (
+			local m = "Not all files were converted. Expected: " + expectedExitFiles.count as string + ". Found: " + cntExistingFiles as string + "."
+			requestMgr.postLog txt: m
+			requestMgr.postStatus #error txt: m
+		) else (
+			local m = "All files have been converted. Uploading to S3."
+			requestMgr.postLog txt: m
+			requestMgr.postStatus #success txt: m
+		)
+		
+		
+		
+		print expectedExitFiles
+		
+		print "!+!+!+!+!!+!+!"
+		print r
 		
 		print "process file"
-		print autoconvertion_id
+		print a_id
 		print version_id
-	)
+	)		
 	
+	on cbxBakeCoronaAO changed v do '*'.add "cbxBakeCoronaAO" v
+	on cbxConvertToBlend changed v do '*'.add "cbxConvertToBlend" v
+	on cbxConvertToSketchup changed v do '*'.add "cbxConvertToSketchup" v
+	on cbxRunListenerErrorObserver changed v do '*'.add "cbxRunListenerErrorObserver" v
 	
 	on btnStartStartupProcess changed v do (
 		local errors = #()
@@ -2025,8 +3707,15 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 			append errors #("Please Working Path!", true)
 		)
 		
+		local isCredentialsError = awsUploaderMgr.checkCredentialsError()
+		if (isCredentialsError) do (
+			btnStartStartupProcess.checked = false
+			append errors #("Invalid AWS credentials. Check the settings and try again!", true)
+		)
+		
 		if (cbxConvertToBlend.checked and not isBlenderExist) do append errors #("Not found Blender program!", false)
 		if (cbxConvertToSketchup.checked and not isSketchupExist) do append errors #("Not found Sketchup program!", false)
+		if (not cbxBakeCoronaAO.checked) do append errors #("Baking AO disabled!", false)
 		
 		if (errors.count > 0) do (
 			local isCritical = false
@@ -2058,7 +3747,7 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 			tmrOnStartDelay.active = false
 			statusMessageRestartMaxIn dispose: true
 			statusMessageScanningWillStart dispose: true
-				
+			
 			lblStatus.caption =	"Autoconverting disabled!"
 			print "Autoconverting disabled!"
 		)
@@ -2067,7 +3756,7 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 	)
 	
 	on _rGCAutoGLBConverter_Main open do (
-		_fGCAutoGLBConverter.pos = [0, 0]
+		_fGCAutoGLBConverter.pos = [0, 25]
 		
 		loadSettings()
 		updateButtonStatus()
@@ -2109,7 +3798,88 @@ rollout _rGCAutoGLBConverter_Main "Main" (
 	)
 )
 
-rollout _rGCAutoGLBConverter_About "About" (
+rollout _rGCAutoGLBConverter_Credentails "Credentails" category: 2 (
+	group "AWS S3" (
+		label lblAwsRegion "Region:" align: #left across: 2
+		edittext edtAwsRegion "" align: #right width: 180
+		
+		label lblAwsBucket "Bucket:" align: #left across: 2
+		edittext edtAwsBucket "" align: #right width: 180
+		
+		label lblAwsUser "User:" align: #left across: 2
+		edittext edtAwsUser "" align: #right width: 180
+		
+		label lblAwsSecretKey "Secret Key:" align: #left across: 2
+		edittext edtAwsSecretKey "" align: #right width: 180
+	)
+	
+	fn loadSettings = (
+		awsUploaderMgr.region = '*'.get "edtAwsRegion"
+		awsUploaderMgr.bucket = '*'.get "edtAwsBucket"
+		awsUploaderMgr.user = '*'.get "edtAwsUser"
+		awsUploaderMgr.key = '*'.get "edtAwsSecretKey"
+		
+		edtAwsRegion.text = awsUploaderMgr.region
+		edtAwsBucket.text = awsUploaderMgr.bucket
+		edtAwsUser.text = awsUploaderMgr.user
+		edtAwsSecretKey.text = awsUploaderMgr.key
+	)
+		
+	on edtAwsRegion changed v do (
+		'*'.add "edtAwsRegion" v
+		awsUploaderMgr.region = v
+	)
+	on edtAwsBucket changed v do (
+		'*'.add "edtAwsBucket" v
+		awsUploaderMgr.bucket = v
+	)
+	on edtAwsUser changed v do (
+		'*'.add "edtAwsUser" v
+		awsUploaderMgr.user = v
+	)
+	on edtAwsSecretKey changed v do (
+		'*'.add "edtAwsSecretKey" v
+		awsUploaderMgr.key = v
+	)
+	
+	on _rGCAutoGLBConverter_Credentails open do (
+		loadSettings()
+	)
+)
+
+rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
+	group "AO Settings" (		
+		spinner spnAOPasses "Passes: " range: [1, 9999, 100] type: #integer fieldwidth: 50 align: #right across: 2 offset: [-15, 0]
+		spinner spnAOSize "Size (cm): " range: [0.1, 9999.0, 5.0] type: #float fieldwidth: 50 
+		spinner spnAOResolution "Resolution:"  range: [512, 8192, 1024] scale: 512 type: #integer align: #right fieldwidth: 50 across: 2  offset: [-15, 0]
+		checkbox cbxAODenoise "Use VRay Denoiser" offset: [15, 0]
+	)
+		
+	fn loadSettings = (
+		local p = '*'.get "spnAOPasses" type: #int
+		spnAOPasses.value = if (p != 0) then p else 100	
+		
+		local s = '*'.get "spnAOSize" type: #float
+		spnAOSize.value = if (s != 0) then s else 5.0
+		
+		local r = '*'.get "spnAOResolution" type: #int
+		spnAOResolution.value = if (r != 0) then r else 1024
+		
+		cbxAODenoise.checked = '*'.get "cbxAODenoise" type: #bool_false
+	)
+	
+	on spnDownloadQueueQuantity changed v do '*'.add  "spnDownloadQueueQuantity" v
+	on spnAOPasses changed v do '*'.add  "spnAOPasses" v
+	on spnAOSize changed v do '*'.add  "spnAOSize" v
+	on spnAOResolution changed v do '*'.add  "spnAOResolution" v
+	on cbxAODenoise changed v do '*'.add  "cbxAODenoise" v		
+	
+	on _rGCAutoGLBConverter_Settings open do (
+		loadSettings()
+	)
+)
+
+rollout _rGCAutoGLBConverter_About "About" category: 4 (
 	group "Description" (
 		dotNetControl edtDescription "System.Windows.Forms.Textbox" align:#center height: 60
 	)
@@ -2241,4 +4011,6 @@ rollout _rGCAutoGLBConverter_About "About" (
 )
 
 addRollout _rGCAutoGLBConverter_Main _fGCAutoGLBConverter rolledUp: false
+addRollout _rGCAutoGLBConverter_Credentails _fGCAutoGLBConverter rolledUp: true
+addRollout _rGCAutoGLBConverter_Settings _fGCAutoGLBConverter rolledUp: true
 addRollout _rGCAutoGLBConverter_About _fGCAutoGLBConverter rolledUp: true

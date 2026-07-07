@@ -1,0 +1,12 @@
+Software:
+
+3Ds Max + VRay + Corona
+Blender
+SketchUp + VRay
+Chrome
+
+
+Notes:
+- Click Allow once to permit the web server to run and screenshots to be captured.
+- When running the script for the first time on a new computer, there may be issues with starting the web server or browser. This is often caused by multiple users or profiles configured in the browser.
+- Before starting batch conversion, test the process with one simple model.
