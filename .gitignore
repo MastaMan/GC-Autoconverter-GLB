@@ -1,2 +1,4 @@
 /model-viewer
 *.local.ini
+*@*.ini
+test-s3-uploader.ini

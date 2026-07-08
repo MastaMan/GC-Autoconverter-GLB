@@ -820,16 +820,61 @@ struct awsUploaderWrapper (
 	bucket = "",
 	user = "",
 	key = "",
+
+	fn readUploadLog logFile = (
+		if (logFile == undefined or logFile == "" or not doesFileExist logFile) do return ""
+
+		local result = ""
+		local stream = undefined
+		try (
+			stream = openFile logFile mode: "rt"
+			while not eof stream do (
+				result += (readLine stream) + "\n"
+			)
+		) catch ()
+
+		try (close stream) catch ()
+		try (deleteFile logFile) catch ()
+		return trimRight result
+	),
 	
 	fn upload f = (
+		if (f == undefined or f == "") do return #("false", "Upload failed: empty file path.", 2)
+		if (not doesFileExist f) do return #("false", ("Upload failed: file does not exist: " + f), 3)
+
 		local n = filenameFromPath f
-		local args = f + ";" + bucket + ";" + region + ";" + n + ";" + user + ";" + key
+		local logFile = (getDir #temp) + "\\s3-uploader-" + (timestamp() as string) + ".log"
+		local args = f + ";" + bucket + ";" + region + ";" + n + ";" + user + ";" + key + ";" + logFile
 		local cmd = "s3-uploader.bat \"" +  args + "\""
+		local exitcode = 0
 		local curDir = sysInfo.currentDir
 		sysInfo.currentDir = currentPath
-		HiddenDOSCommand cmd exitCode: &exitcode donotwait: false
-		
+		try (
+			HiddenDOSCommand cmd exitCode: &exitcode donotwait: false
+		) catch (
+			exitcode = -1
+		)
+
 		sysInfo.currentDir = curDir
+
+		if (exitcode == 0) then (
+			return #("true", ("Uploaded to S3: " + n), exitcode)
+		) else (
+			local curlLog = readUploadLog logFile
+			local msg = case exitcode of (
+				2: "Upload failed: S3 uploader received invalid arguments for " + n + "."
+				3: "Upload failed: file not found: " + n + "."
+				4: "Upload failed: curl.exe not found."
+				10: "Upload failed: S3 rejected or interrupted upload for " + n + "."
+				default: "Upload failed: " + n + ". Exit code: " + (exitcode as string) + "."
+			)
+
+			if (curlLog != "") do (
+				format "S3 upload error for %:\n%\n" n curlLog
+				msg += "\n\nCurl output:\n" + curlLog
+			)
+			return #("false", msg, exitcode)
+		)
 	),
 	fn checkCredentialsError = (
 		if (region.count < 5) do return true
@@ -3695,7 +3740,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				skpMgr.init name: (slug + "-SKP") glb: glb
 				join expectedExitFiles #(
 					d + slug + "-SKP.zip",
-					d + slug + "-SKP.json"
+					d + slug + "-SKP.json",
 					d + slug + "-SKP.png"
 				)
 				
@@ -3710,27 +3755,58 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		if (cntExistingFiles != expectedExitFiles.count) then (
 			local m = "Not all files were converted. Expected: " + expectedExitFiles.count as string + ". Found: " + cntExistingFiles as string + "."
 			requestMgr.postLog txt: m
-			requestMgr.postStatus #error txt: m
 		) else (
 			local m = "All files have been converted. Uploading to S3."
 			requestMgr.postLog txt: m
-			requestMgr.postStatus #success txt: m
 		)
 		
-		--!!! here need upload functon
+		local uploadedFiles = #()
+		local failedFiles = #()
 		
+		lblStatus.caption = "Uploading files to S3..."
+		requestMgr.postLog txt: "Uploading files to S3..."
+		
+		for f in expectedExitFiles do (
+			local fileName = filenameFromPath f
+
+			if (not doesFileExist f) then (
+				local m = "[Error] Upload skipped. File does not exist: " + fileName
+				append failedFiles fileName
+				requestMgr.postLog txt: m
+			) else (
+				local uploadResult = awsUploaderMgr.upload f
+				local isUploaded = (uploadResult[1] == "true")
+				local uploadMessage = uploadResult[2]
+
+				if (isUploaded) then (
+					append uploadedFiles fileName
+					requestMgr.postLog txt: ("Uploaded to S3: " + fileName)
+				) else (
+					append failedFiles fileName
+					requestMgr.postLog txt: ("[Error] " + uploadMessage)
+				)
+			)
+		)
+		
+		if (uploadedFiles.count == expectedExitFiles.count) then (
+			local m = "All files uploaded to S3 successfully: " + (implodeString uploadedFiles)
+			lblStatus.caption = "All files uploaded to S3..."
+			requestMgr.postStatus #uploaded txt: m
+			requestMgr.postLog txt: m
+		) else if (uploadedFiles.count > 0) then (
+			local m = "Not all files uploaded to S3. Failed files: " + (implodeString failedFiles)
+			lblStatus.caption = "Some files were not uploaded..."
+			requestMgr.postStatus #uploaded txt: m
+			requestMgr.postLog txt: m
+		) else (
+			local m = "Files were not uploaded to S3. Failed files: " + (implodeString failedFiles)
+			lblStatus.caption = "Files were not uploaded..."
+			requestMgr.postStatus #error txt: m
+			requestMgr.postLog txt: m
+		)
 		
 		statusMessageNextProcess create: true
 		tmrNextProcess.active = true
-		
-		print expectedExitFiles
-		
-		print "!+!+!+!+!!+!+!"
-		print r
-		
-		print "process file"
-		print a_id
-		print version_id
 	)		
 	
 	on cbxBakeCoronaAO changed v do '*'.add "cbxBakeCoronaAO" v
