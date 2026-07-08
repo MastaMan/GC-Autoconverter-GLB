@@ -126,6 +126,24 @@ struct JsonWrapper (
 		
 		append data #(k, v)
 	),
+
+	fn addZero p = (
+		p = p as string
+		if (p.count == 1) do p = "0" + p
+		return p
+	),
+
+	fn getCurrentDateTime = (
+		local n = (dotNetClass "System.DateTime").Now
+		local d = addZero n.day
+		local m = addZero n.month
+		local y = n.year as string
+		local hh = addZero n.hour
+		local mm = addZero n.minute
+		local ss = addZero n.second
+
+		return d + "." + m + "." + y + " " + hh + ":" + mm + ":" + ss
+	),
 	
 	fn writeFileUTF8 o b = (
 		local s = dotNetObject "System.IO.StreamWriter" (o) true ((dotNetClass "System.Text.Encoding").GetEncoding("UTF-8"))
@@ -183,7 +201,7 @@ struct JsonWrapper (
 		try (deleteFile fname) catch ()
 		
 		-- Force add some data in the end
-		addData data "date" ((dateTime()).getCurrent())
+		addData data "date" (getCurrentDateTime())
 		addData data "scriptVersion" (getScriptVersion())
 		addData data "scriptName" (getScriptName())
 		
@@ -3953,7 +3971,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			requestMgr.postLog txt: m
 		)
 		
-		lblSlug.captoin = "--"
+		lblSlug.caption = "--"
 		
 		statusMessageNextProcess create: true
 		tmrNextProcess.active = true

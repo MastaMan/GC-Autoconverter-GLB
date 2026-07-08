@@ -1,0 +1,1 @@
+global MAX_AUTOSTART=true
