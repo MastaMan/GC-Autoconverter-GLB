@@ -1665,7 +1665,7 @@ struct WebGLPlayerWrapper (
 			extractZip	zippedPlayer playerPath
 		)
 		
-		if (not doesFileExist webserver) do return  messageBox "Can't find Model Viwer Player or Webserver, please reinstall script!" title: "Warining!"
+		if (not doesFileExist webserver) do return  messageBox "Cannot find Model Viewer Player or Webserver. Please reinstall the script." title: "Warning!"
 		
 		curDir = sysInfo.currentDir
 		sysInfo.currentDir = playerPath	
@@ -3385,7 +3385,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			countdownNextProcess = nextProcess
 		)
 		
-		lblStatus.caption = "Done. Take next file in " + (countdownNextProcess as string) + " seconds..."	
+		lblStatus.caption = "Done. Taking the next file in " + (countdownNextProcess as string) + " seconds..."
 	)
 	
 	fn statusMessageScanningWillStart create: false dispose: false = (
@@ -3424,7 +3424,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local timeMin = m + ":" + s
 		local f = if (m == "0") then "sec" else "min"
 		
-		lblStatus.caption = formatString "Restarting 3D Max in $1 $2..." v: #(timeMin, f)
+		lblStatus.caption = formatString "Restarting 3ds Max in $1 $2..." v: #(timeMin, f)
 	)
 	
 	local lastStatusMsg = ""
@@ -3572,18 +3572,18 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local q = requestMgr.getQueue()
 		jr.read q
 		
-		lblStatus.caption = "Get queue..."
+		lblStatus.caption = "Getting queue..."
 		
 		-- Is correct JSON (Restart)
 		local isSuccess = jr.getBool "success"
 		if (not isSuccess) do (	
-			restartProcessFiles msg: "Can't retrieve request from API. Restart in"
+			restartProcessFiles msg: "Cannot retrieve a request from the API. Restarting in"
 			return false
 		)
 		
 		-- Is Queue empty (Restart)
 		if (jr.getString "message" != "queue_item_received") do (
-			restartProcessFiles msg: "Queue is empty. Restart in"
+			restartProcessFiles msg: "Queue is empty. Restarting in"
 			return false
 		)
 		
@@ -3591,7 +3591,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		statusMessageRestartMaxIn dispose: true
 		statusMessageScanningWillStart dispose: true
 		
-		lblStatus.caption = "Parse JSON..."
+		lblStatus.caption = "Parsing queue response..."
 		
 		-- Parse JSON
 		local a_id = jr.getString "autoconvertion_id"
@@ -3607,28 +3607,28 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		requestMgr.version_id = version_id
 		requestMgr.slug = slug				
 		
-		requestMgr.postLog txt: "Update status to In Progress.."		
-		lblStatus.caption = "Update status to In Progress..."
+		requestMgr.postLog txt: "Updating status to In Progress..."
+		lblStatus.caption = "Updating status to In Progress..."
 		
 		-- Set Status: in_progress
-		requestMgr.postStatus #in_progress txt: (slug + " file in progress!")
+		requestMgr.postStatus #in_progress txt: ("Processing file: " + slug)
 		
 		local downloadMgr = DownloadWrapper()
 		local guid = genGUID()
 		local fname = guid + ".zip"
 		local file = d + fname
 		-- Clear all files in folder
-		lblStatus.caption = "Clear folder..."
+		lblStatus.caption = "Clearing working folder..."
 		clearFolder d
 		
 		-- Download file
-		requestMgr.postLog txt: "Downloading file.."
-		lblStatus.caption = "Downloading file..."
+		requestMgr.postLog txt: "Downloading source file..."
+		lblStatus.caption = "Downloading source file..."
 		
 		downloadMgr.download download_url file
 		
-		requestMgr.postLog txt: "File downloaded, validate file"
-		lblStatus.caption = "File downloaded..."
+		requestMgr.postLog txt: "Source file downloaded. Validating file..."
+		lblStatus.caption = "Validating downloaded file..."
 		
 		-- !!! uncomment this
 		-- Tell that we try conversion
@@ -3636,15 +3636,15 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		
 		-- Is file not valid immediately request next file
 		if (not downloadMgr.isValidFile file) do (
-			requestMgr.postLog txt: "File not valid!"
-			requestMgr.postStatus #error txt: ("File not valid: " + slug + "!")
-			lblStatus.caption = "File not downloaded..."
+			requestMgr.postLog txt: "Downloaded file is invalid."
+			requestMgr.postStatus #error txt: ("Downloaded file is invalid: " + slug)
+			lblStatus.caption = "Downloaded file is invalid."
 			processFiles()
 			return false
 		)
 		
-		requestMgr.postLog txt: ("File downloaded: " + slug + "!")
-		requestMgr.postStatus #downloaded txt: ("File downloaded: " + slug + "!")
+		requestMgr.postLog txt: ("Source file downloaded: " + slug)
+		requestMgr.postStatus #downloaded txt: ("Source file downloaded: " + slug)
 		
 		local blendGLBMgr = BlenderGLBWrapper()
 		local skpMgr = SketchupConverterWrapper()
@@ -3663,30 +3663,30 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		ao.denoise = ::_rGCAutoGLBConverter_Settings.cbxAODenoise.checked
 		ao.type = #corona
 		
-		lblStatus.caption = "Unzip and loading scene..."
-		requestMgr.postLog txt: ("Unzip and loading scene...")
+		lblStatus.caption = "Extracting archive and loading scene..."
+		requestMgr.postLog txt: "Extracting archive and loading scene..."
 		local r = ::API_BATCH_GLB_CONVERTER.load file
 		
 		if (not r.opened) do (
 			clearFolder d
-			requestMgr.postLog txt: ("[Error] Can't open scene file!")
-			requestMgr.postStatus #error txt: ("Can't open scene file!")
-			lblStatus.caption = "Can't open scene file..."
+			requestMgr.postLog txt: "[Error] Cannot open scene file."
+			requestMgr.postStatus #error txt: "Cannot open scene file."
+			lblStatus.caption = "Cannot open scene file."
 			processFiles()
 			return false
 		)
 		
 		local polys = (utilsWrapper()).polyCount objects
 		if (polys[1] >= _MAX_ALLOWED_POLYS) do (
-			requestMgr.postLog txt: ("[Error] The polygon count exceeds the allowed limit!")
+			requestMgr.postLog txt: "[Error] Polygon count exceeds the allowed limit."
 			requestMgr.postStatus #error txt: ("The polygon count exceeds the allowed limit: " + _MAX_ALLOWED_POLYS as string)
-			lblStatus.caption = "Too much polygons, skiping!"
+			lblStatus.caption = "Polygon limit exceeded. Skipping file."
 			processFiles()
 			return false			
 		)
 		
-		lblStatus.caption = "Fix scene: BoxTrick, Attach All, Set Pivot..."
-		requestMgr.postLog txt: "Fix scene: BoxTrick, Attach All, Set Pivot..."
+		lblStatus.caption = "Preparing scene: BoxTrick, Attach All, Set Pivot..."
+		requestMgr.postLog txt: "Preparing scene: BoxTrick, Attach All, Set Pivot..."
 		
 		explodeAllGroups()
 		disableIsolineDisplayForSmooth()
@@ -3704,15 +3704,15 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			d + slug + "-GLB-WEBGL.glb"
 		)
 		
-		lblStatus.caption = "Convert to GLB..."
-		requestMgr.postLog txt: "Convert to GLB..."
+		lblStatus.caption = "Converting to GLB..."
+		requestMgr.postLog txt: "Converting to GLB..."
 		local glb = ::API_BATCH_GLB_CONVERTER.run scn: r out: d ao: ao isNormalizeTiling: false
 		
 		-- Convert to Blender
 		if (cbxConvertToBlend.checked) do (
 			if (blendGLBMgr.isBlenderExist()) then (
-				lblStatus.caption = "Convert to Blender..."
-				requestMgr.postLog txt: "Convert to Blender..."
+				lblStatus.caption = "Converting to Blender..."
+				requestMgr.postLog txt: "Converting to Blender..."
 				
 				blendGLBMgr.init glb: glb name: (slug + "-BLEND")
 				join expectedExitFiles #(
@@ -3727,15 +3727,15 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				blendGLBMgr.makeArchive()
 				blendGLBMgr.makeJson()
 			) else (
-				requestMgr.postLog txt: ("[Error] Option convert to Blender selected but program not found!")
+				requestMgr.postLog txt: "[Error] Blender conversion is enabled, but Blender was not found."
 			)			
 		)
 		
-		-- Convert to Sketchup
+		-- Convert to SketchUp
 		if (cbxConvertToSketchup.checked) do (
 			if (skpMgr.isSketchupExist()) then (
-				lblStatus.caption = "Converting to Sketchup..."
-				requestMgr.postLog txt: "Converting to Sketchup..."
+				lblStatus.caption = "Converting to SketchUp..."
+				requestMgr.postLog txt: "Converting to SketchUp..."
 				
 				skpMgr.init name: (slug + "-SKP") glb: glb
 				join expectedExitFiles #(
@@ -3747,7 +3747,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				skpMgr.convertMax2Skp()	
 				skpMgr.makeJson()	
 			) else (
-				requestMgr.postLog txt: ("[Error] Option convert to Sketchup selected but program not found!")
+				requestMgr.postLog txt: "[Error] SketchUp conversion is enabled, but SketchUp was not found."
 			)			
 		)
 		
@@ -3756,7 +3756,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			local m = "Not all files were converted. Expected: " + expectedExitFiles.count as string + ". Found: " + cntExistingFiles as string + "."
 			requestMgr.postLog txt: m
 		) else (
-			local m = "All files have been converted. Uploading to S3."
+			local m = "All files were converted. Uploading to S3..."
 			requestMgr.postLog txt: m
 		)
 		
@@ -3789,18 +3789,18 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		)
 		
 		if (uploadedFiles.count == expectedExitFiles.count) then (
-			local m = "All files uploaded to S3 successfully: " + (implodeString uploadedFiles)
-			lblStatus.caption = "All files uploaded to S3..."
+			local m = "All files were uploaded to S3 successfully: " + (implodeString uploadedFiles)
+			lblStatus.caption = "All files were uploaded to S3."
 			requestMgr.postStatus #uploaded txt: m
 			requestMgr.postLog txt: m
 		) else if (uploadedFiles.count > 0) then (
-			local m = "Not all files uploaded to S3. Failed files: " + (implodeString failedFiles)
-			lblStatus.caption = "Some files were not uploaded..."
+			local m = "Not all files were uploaded to S3. Failed files: " + (implodeString failedFiles)
+			lblStatus.caption = "Some files were not uploaded."
 			requestMgr.postStatus #uploaded txt: m
 			requestMgr.postLog txt: m
 		) else (
-			local m = "Files were not uploaded to S3. Failed files: " + (implodeString failedFiles)
-			lblStatus.caption = "Files were not uploaded..."
+			local m = "No files were uploaded to S3. Failed files: " + (implodeString failedFiles)
+			lblStatus.caption = "No files were uploaded."
 			requestMgr.postStatus #error txt: m
 			requestMgr.postLog txt: m
 		)
@@ -3823,7 +3823,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		
 		if (d == "") do (
 			btnStartStartupProcess.checked = false
-			append errors #("Please Working Path!", true)
+			append errors #("Please set the working path.", true)
 		)
 		
 		local isAwsCredentialsError = awsUploaderMgr.checkCredentialsError()
@@ -3838,9 +3838,9 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			append errors #("Invalid Web API credentials. Check the settings and try again!", true)
 		)
 		
-		if (cbxConvertToBlend.checked and not isBlenderExist) do append errors #("Not found Blender program!", false)
-		if (cbxConvertToSketchup.checked and not isSketchupExist) do append errors #("Not found Sketchup program!", false)
-		if (not cbxBakeCoronaAO.checked) do append errors #("Baking AO disabled!", false)
+		if (cbxConvertToBlend.checked and not isBlenderExist) do append errors #("Blender was not found.", false)
+		if (cbxConvertToSketchup.checked and not isSketchupExist) do append errors #("SketchUp was not found.", false)
+		if (not cbxBakeCoronaAO.checked) do append errors #("AO baking is disabled.", false)
 		
 		if (errors.count > 0) do (
 			local isCritical = false
@@ -3866,7 +3866,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			
 			tmrOnStartDelay.active = true
 			
-			print "Autoconverting enabled!"
+			print "Auto-conversion is enabled."
 		) else (
 			forceDeleteFile startupScript	
 			tmrOnStartDelay.active = false
@@ -3878,8 +3878,8 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			statusMessageNextProcess dispose: true
 			statusMessageRestartQueueIn dispose: true
 			
-			lblStatus.caption =	"Autoconverting disabled!"
-			print "Autoconverting disabled!"
+			lblStatus.caption =	"Auto-conversion is disabled."
+			print "Auto-conversion is disabled."
 		)
 		
 		updateButtonStatus()
@@ -3897,7 +3897,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			if (d == "") do (
 				btnStartStartupProcess.checked = false
 				forceDeleteFile startupScript
-				return messageBox "Please set Working Path!" title: "Error!"
+				return messageBox "Please set the working path." title: "Error!"
 			)
 			
 			statusMessageScanningWillStart create: true
@@ -3937,7 +3937,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	)
 )
 
-rollout _rGCAutoGLBConverter_Credentails "Credentails" category: 2 (
+rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 	group "Web API" (
 		label lblWebApiSecretKey "Secret Key:" align: #left across: 2
 		edittext edtWebApiSecretKey "" align: #right width: 180
