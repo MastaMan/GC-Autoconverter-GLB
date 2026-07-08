@@ -3208,7 +3208,7 @@ global _rGCAutoGLBConverter_Settings = undefined
 global _rGCAutoGLBConverter_About = undefined
 
 try(closeRolloutFloater _fGCAutoGLBConverter) catch()
-global _fGCAutoGLBConverter = newRolloutFloater "" 300 365
+global _fGCAutoGLBConverter = newRolloutFloater "" 300 380
 
 
 fn getLogginFile = (
@@ -3296,6 +3296,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	)
 	
 	progressBar pbProgress "" height: 9 color: (color 52 168 83) value: 0 offset: [0, 5]
+	label lblSlug "--"  align: #left
 	label lblStatus "" align: #left offset: [0, 5]
 	checkbutton btnStartStartupProcess "Autostart and Process" width: 260 height: 32 enabled: false highlightColor: (color 52 168 83)
 	
@@ -3698,6 +3699,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	
 	/* PROCESS FILES */
 	fn processFiles = (
+		lblSlug.caption = ""
 		local isAwsCredentialsError = awsUploaderMgr.checkCredentialsError()
 		if (isAwsCredentialsError) do (
 			messageBox "AWS S3 credentials are missing or invalid. Check the settings and try again." title: "Error!"
@@ -3764,6 +3766,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		
 		-- Set Status: in_progress
 		requestMgr.postStatus #in_progress txt: ("Processing file: " + slug)
+		lblSlug.caption = slug
 		
 		local downloadMgr = DownloadWrapper()
 		local guid = genGUID()
@@ -3949,6 +3952,8 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			requestMgr.postStatus #error txt: m
 			requestMgr.postLog txt: m
 		)
+		
+		lblSlug.captoin = "--"
 		
 		statusMessageNextProcess create: true
 		tmrNextProcess.active = true
