@@ -3307,7 +3307,7 @@ global _rGCAutoGLBConverter_Settings = undefined
 global _rGCAutoGLBConverter_About = undefined
 
 try(closeRolloutFloater _fGCAutoGLBConverter) catch()
-global _fGCAutoGLBConverter = newRolloutFloater "" 300 440
+global _fGCAutoGLBConverter = newRolloutFloater "" 300 460
 
 
 fn getLogginFile = (
@@ -3751,9 +3751,17 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		try (max views redraw) catch ()
 	)
 
-	fn convertSceneVariant scn glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles = (
+	fn convertSceneVariant scn glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles convertToBlend: undefined convertToSketchup: undefined postLogs: true = (
+		if (convertToBlend == undefined) do convertToBlend = cbxConvertToBlend.checked
+		if (convertToSketchup == undefined) do convertToSketchup = cbxConvertToSketchup.checked
+
+		fn logMessage txt postLogs: true = (
+			print txt
+			if (postLogs) do requestMgr.postLog txt: txt
+		)
+
 		lblStatus.caption = "Preparing scene: BoxTrick, Attach All, Set Pivot..."
-		requestMgr.postLog txt: ("Preparing scene for conversion: " + glbName)
+		logMessage ("Preparing scene for conversion: " + glbName) postLogs: postLogs
 
 		explodeAllGroups()
 		disableIsolineDisplayForSmooth()
@@ -3772,14 +3780,14 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		)
 
 		lblStatus.caption = "Converting to GLB..."
-		requestMgr.postLog txt: ("Converting to GLB: " + glbName)
+		logMessage ("Converting to GLB: " + glbName) postLogs: postLogs
 		local glb = ::API_BATCH_GLB_CONVERTER.run scn: scn out: d ao: ao isNormalizeTiling: false
 
 		-- Convert to Blender
-		if (cbxConvertToBlend.checked) do (
+		if (convertToBlend) do (
 			if (blendGLBMgr.isBlenderExist()) then (
 				lblStatus.caption = "Converting to Blender..."
-				requestMgr.postLog txt: ("Converting to Blender: " + blendName)
+				logMessage ("Converting to Blender: " + blendName) postLogs: postLogs
 
 				blendGLBMgr.init glb: glb name: blendName
 				join expectedExitFiles #(
@@ -3794,15 +3802,15 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				blendGLBMgr.makeArchive()
 				blendGLBMgr.makeJson()
 			) else (
-				requestMgr.postLog txt: "[Error] Blender conversion is enabled, but Blender was not found."
+				logMessage "[Error] Blender conversion is enabled, but Blender was not found." postLogs: postLogs
 			)
 		)
 
 		-- Convert to SketchUp
-		if (cbxConvertToSketchup.checked) do (
+		if (convertToSketchup) do (
 			if (skpMgr.isSketchupExist()) then (
 				lblStatus.caption = "Converting to SketchUp..."
-				requestMgr.postLog txt: ("Converting to SketchUp: " + skpName)
+				logMessage ("Converting to SketchUp: " + skpName) postLogs: postLogs
 
 				skpMgr.init name: skpName glb: glb
 				join expectedExitFiles #(
@@ -3814,7 +3822,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				skpMgr.convertMax2Skp()
 				skpMgr.makeJson()
 			) else (
-				requestMgr.postLog txt: "[Error] SketchUp conversion is enabled, but SketchUp was not found."
+				logMessage "[Error] SketchUp conversion is enabled, but SketchUp was not found." postLogs: postLogs
 			)
 		)
 
@@ -4402,7 +4410,242 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 	)
 )
 
-rollout _rGCAutoGLBConverter_About "About" category: 4 (
+rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
+	group "Formats" (
+		checkbox cbxDebugBakeCoronaAO "Bake Corona AO"
+		checkbox cbxDebugConvertToBlend "Convert to BLEND"
+		checkbox cbxDebugConvertToSketchup "Convert to SKP"
+	)
+
+	button btnDebugConvertCurrentScene "Convert Current Scene" width: 260 height: 32
+	button btnDebugPreviewGLB "Preview GLB File" width: 260 height: 24
+	label lblDebugStatus "" align: #left offset: [0, 5]
+
+	fn debugLog txt = (
+		print ("[Debug] " + txt)
+		lblDebugStatus.caption = txt
+		try (::_rGCAutoGLBConverter_Main.lblStatus.caption = txt) catch ()
+	)
+
+	fn ensureTrailingSlash p = (
+		if (p == undefined) do p = ""
+		p = trimLeft (trimRight (p as string))
+		if ((p != "") and ((substring p p.count 1) != "\\")) do p += "\\"
+		return p
+	)
+
+	fn getOutputPath = (
+		local p = try (::_rGCAutoGLBConverter_Main.edtInputPath.text) catch ("")
+		p = ensureTrailingSlash p
+		if (p == "") do p = ensureTrailingSlash maxFilePath
+		return p
+	)
+
+	fn buildAOSettings = (
+		struct Debug_AO_Settings (enabled, passes, resolution, denoise, size, type)
+		local ao = Debug_AO_Settings()
+		local aoSize = try (::_rGCAutoGLBConverter_Settings.spnAOSize.value) catch (5.0)
+		ao.enabled = cbxDebugBakeCoronaAO.checked
+		ao.size = (aoSize as string) + "cm"
+		ao.passes = try (::_rGCAutoGLBConverter_Settings.spnAOPasses.value) catch (100)
+		ao.resolution = try (::_rGCAutoGLBConverter_Settings.spnAOResolution.value) catch (1024)
+		ao.denoise = try (::_rGCAutoGLBConverter_Settings.cbxAODenoise.checked) catch (false)
+		ao.type = #corona
+		return ao
+	)
+
+	fn saveConvertedCompareScene filename = (
+		try (
+			saveMaxFile filename quiet: true
+			return doesFileExist filename
+		) catch (
+			return false
+		)
+	)
+
+	fn rememberLastDebugGLB expectedExitFiles = (
+		for f in expectedExitFiles where (toLower (getFilenameType f) == ".glb" and doesFileExist f) do (
+			'*'.add "debugLastGLB" f
+			return f
+		)
+
+		return ""
+	)
+
+	fn getLastDebugGLB = (
+		local f = '*'.get "debugLastGLB"
+		if (f != "" and doesFileExist f) do return f
+
+		if (maxFileName != "") do (
+			local sceneName = getFilenameFile maxFileName
+			local d = getOutputPath()
+			local candidates = #(
+				d + sceneName + "-GLB.glb",
+				d + sceneName + "-GLB-1.glb"
+			)
+
+			for candidate in candidates where doesFileExist candidate do return candidate
+		)
+
+		return ""
+	)
+
+	fn previewDebugGLB = (
+		local f = getLastDebugGLB()
+		if (f == "") do (
+			messageBox "Debug GLB file was not found. Run Convert Current Scene first." title: "Debug"
+			return false
+		)
+
+		debugLog ("Opening GLB preview: " + f)
+		local viewer = WebGLPlayerWrapper()
+		viewer.run()
+		viewer.previewModel f kill: "0"
+		return true
+	)
+
+	fn convertDebugScene = (
+		if (maxFileName == "" or maxFilePath == "") do (
+			messageBox "Please save the current scene before debug conversion." title: "Debug"
+			return false
+		)
+
+		local sceneName = getFilenameFile maxFileName
+		local d = getOutputPath()
+		if (d == "") do (
+			messageBox "Please set the working path or save the current scene." title: "Debug"
+			return false
+		)
+
+		makeDir d all: true
+
+		local originalSceneFile = d + sceneName + "-ORIGINAL.max"
+		local workingSceneFile = d + sceneName + "-DEBUG-WORKING.max"
+		local convertedSceneFile = d + sceneName + "-GLB.max"
+		local expectedExitFiles = #()
+		local convertedSceneFiles = #()
+
+		debugLog ("Saving original compare scene: " + originalSceneFile)
+		if (not (saveConvertedCompareScene originalSceneFile)) do (
+			messageBox "Cannot save original compare scene." title: "Debug"
+			return false
+		)
+
+		try (deleteFile workingSceneFile) catch ()
+		if (not (copyFile originalSceneFile workingSceneFile)) do (
+			messageBox "Cannot create debug working scene copy." title: "Debug"
+			return false
+		)
+
+		clearListener()
+		SetQuietMode true
+		SceneConverter.BackupOriginalFiles = false
+		escapeEnable = true
+
+		local blendGLBMgr = BlenderGLBWrapper()
+		local skpMgr = SketchupConverterWrapper()
+		local ao = buildAOSettings()
+
+		debugLog ("Loading debug working scene: " + workingSceneFile)
+		local r = ::API_BATCH_GLB_CONVERTER.load workingSceneFile
+		if (not r.opened) do (
+			SetQuietMode false
+			messageBox "Cannot open debug working scene." title: "Debug"
+			return false
+		)
+
+		local layerNames = ::_rGCAutoGLBConverter_Main.getGeometryLayerNames()
+		local splitByLayers = layerNames.count > 1
+
+		if (splitByLayers) then (
+			debugLog ("Scene has " + (layerNames.count as string) + " layers with objects. Converting each layer separately.")
+			for layerName in layerNames do (
+				local stat = ::_rGCAutoGLBConverter_Main.getGeometryLayerPolyStats layerName
+				debugLog ("Layer polygon count: " + (::_rGCAutoGLBConverter_Main.formatPolyStats stat))
+			)
+
+			local failedLayerStats = ::_rGCAutoGLBConverter_Main.getLayersOverPolyLimit layerNames
+			if (failedLayerStats.count > 0) do (
+				local m = "Layer polygon limit exceeded. Limit per layer: " + (_MAX_ALLOWED_POLYS as string) + ". Failed layers: " + (::_rGCAutoGLBConverter_Main.formatPolyStatsList failedLayerStats) + "."
+				SetQuietMode false
+				messageBox m title: "Debug"
+				return false
+			)
+
+			for i in 1 to layerNames.count do (
+				local layerName = layerNames[i]
+				local suffix = "-" + (i as string)
+				local glbName = sceneName + "-GLB" + suffix
+				local blendName = sceneName + "-BLEND" + suffix
+				local skpName = sceneName + "-SKP" + suffix
+				local layerCompareScene = d + glbName + ".max"
+
+				debugLog ("Loading source scene for layer " + (i as string) + ": " + layerName)
+				loadMaxFile workingSceneFile quiet: true
+				::_rGCAutoGLBConverter_Main.resetLoadedSceneState()
+
+				local objectsCount = ::_rGCAutoGLBConverter_Main.keepOnlyGeometryFromLayer layerName
+				if (objectsCount == 0) then (
+					debugLog ("Layer has no geometry after reload. Skipping layer: " + layerName)
+				) else (
+					debugLog ("Converting layer " + (i as string) + " of " + (layerNames.count as string) + ": " + layerName)
+					::_rGCAutoGLBConverter_Main.convertSceneVariant r glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles convertToBlend: cbxDebugConvertToBlend.checked convertToSketchup: cbxDebugConvertToSketchup.checked postLogs: false
+					if (saveConvertedCompareScene layerCompareScene) do append convertedSceneFiles layerCompareScene
+				)
+			)
+
+			try (saveConvertedCompareScene convertedSceneFile) catch ()
+		) else (
+			local sceneStat = ::_rGCAutoGLBConverter_Main.getGeometryPolyStats (geometry as array) label: "Whole scene"
+			debugLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
+			debugLog ("Scene polygon count: " + (::_rGCAutoGLBConverter_Main.formatPolyStats sceneStat))
+			if (sceneStat[2] > _MAX_ALLOWED_POLYS) do (
+				local m = "The polygon count exceeds the allowed limit. Limit: " + (_MAX_ALLOWED_POLYS as string) + ". Scene polygons: " + (sceneStat[2] as string) + "."
+				SetQuietMode false
+				messageBox m title: "Debug"
+				return false
+			)
+
+			::_rGCAutoGLBConverter_Main.convertSceneVariant r (sceneName + "-GLB") (sceneName + "-BLEND") (sceneName + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles convertToBlend: cbxDebugConvertToBlend.checked convertToSketchup: cbxDebugConvertToSketchup.checked postLogs: false
+			if (saveConvertedCompareScene convertedSceneFile) do append convertedSceneFiles convertedSceneFile
+		)
+
+		local cntExistingFiles = ::_rGCAutoGLBConverter_Main.checkExistingFiles expectedExitFiles
+		local lastGLB = rememberLastDebugGLB expectedExitFiles
+		local m = "Debug conversion finished.\n\nOriginal scene:\n" + originalSceneFile + "\n\nConverted scene:\n" + convertedSceneFile + "\n\nConverted files found: " + (cntExistingFiles as string) + " of " + (expectedExitFiles.count as string) + "."
+		if (lastGLB != "") do m += "\n\nPreview GLB:\n" + lastGLB
+		if (convertedSceneFiles.count > 1) do m += "\n\nLayer compare scenes: " + (convertedSceneFiles.count as string)
+
+		SetQuietMode false
+		debugLog "Debug conversion finished."
+		messageBox m title: "Debug"
+		return true
+	)
+
+	fn loadSettings = (
+		cbxDebugBakeCoronaAO.checked = '*'.get "cbxDebugBakeCoronaAO" type: #bool_true
+		cbxDebugConvertToBlend.checked = '*'.get "cbxDebugConvertToBlend" type: #bool_true
+		cbxDebugConvertToSketchup.checked = '*'.get "cbxDebugConvertToSketchup" type: #bool_true
+	)
+
+	on cbxDebugBakeCoronaAO changed v do '*'.add "cbxDebugBakeCoronaAO" v
+	on cbxDebugConvertToBlend changed v do '*'.add "cbxDebugConvertToBlend" v
+	on cbxDebugConvertToSketchup changed v do '*'.add "cbxDebugConvertToSketchup" v
+
+	on btnDebugConvertCurrentScene pressed do (
+		convertDebugScene()
+	)
+
+	on btnDebugPreviewGLB pressed do (
+		previewDebugGLB()
+	)
+
+	on _rGCAutoGLBConverter_Debug open do (
+		loadSettings()
+	)
+)
+
+rollout _rGCAutoGLBConverter_About "About" category: 5 (
 	group "Description" (
 		dotNetControl edtDescription "System.Windows.Forms.Textbox" align:#center height: 60
 	)
@@ -4536,4 +4779,5 @@ rollout _rGCAutoGLBConverter_About "About" category: 4 (
 addRollout _rGCAutoGLBConverter_Main _fGCAutoGLBConverter rolledUp: false
 addRollout _rGCAutoGLBConverter_Credentails _fGCAutoGLBConverter rolledUp: true
 addRollout _rGCAutoGLBConverter_Settings _fGCAutoGLBConverter rolledUp: true
+addRollout _rGCAutoGLBConverter_Debug _fGCAutoGLBConverter rolledUp: true
 addRollout _rGCAutoGLBConverter_About _fGCAutoGLBConverter rolledUp: true
