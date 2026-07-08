@@ -26,7 +26,7 @@ rollout listenerObserver "Listener Observer" (
 		local f = (getDir #maxroot) + "3dsmax.exe"
 		local currentPath = getFilenamePath (getThisScriptFilename())
 		local dontRun = if (::MAX_AUTOSTART == true) then "dontrun" else "run"
-			
+		
 		local args = f + ";" + dontRun
 		args = substituteString args "/" @"\"
 		

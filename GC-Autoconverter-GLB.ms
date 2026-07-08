@@ -58,7 +58,10 @@ struct listenerObserverWrapper (
 	currentPath = getFileNamePath (getThisScriptFileName()),
 	script = currentPath + "listener-error-observer.ms",
 	fn run = (		
-		try (fileIn script) catch ()
+		try (fileIn script) catch (print "Can't run Listener Observer service!")
+	),
+	fn destroy = (
+		try (DestroyDialog listenerObserver) catch ()
 	)
 )
 
@@ -557,7 +560,7 @@ struct requestWrapper (
 	apiGetQueue = apiUrl  + "queue.php",
 	apiPostStatus = apiUrl  + "status.php",
 	apiPostLog = apiUrl  + "log.php",
-	apiKey = "1MMPIyo8sRUACDV9ywqsV1n9gNk4gemGCrmW-L2zZgA",
+	apiKey = "",
 	fn downloadString lnk headers: #(#("x-api-key", apiKey)) = (
 		local w = dotNetObject "System.Net.WebClient"
 		try(
@@ -639,8 +642,15 @@ struct requestWrapper (
 			#("txt", txt)
 		)
 		return this.post apiPostLog data
+	),
+	fn checkCredentialsError = (
+		if (apiKey.count < 20) do return true
+		
+		return false
 	)
 )
+
+global requestMgr = requestWrapper()
 
 fn clearFolder d = (
 	local selfPath = getFileNamePath (getThisScriptFileName())		
@@ -3208,11 +3218,12 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	local onstartDelay = 20 --sec !!! 20
 	local restartProgramInterval = 60
 	local restartReadReadQueue = 1 -- min !!!!! 5
-	
-	local requestMgr = requestWrapper()
+	local nextProcess = 10 -- sec
+		
 	local jsonReaderMgr = JsonReaderWrapper()
 	local startupScript = (getDir #userStartupScripts) + @"\AUTO_CONVERTER_GLB_STARTUP.ms"
 	
+	local countdownNextProcess = nextProcess
 	local countdownBeforeStart = onstartDelay
 	local countdownMaxRestart = 60 -- sec
 	local countdownQueueRestart = restartReadReadQueue
@@ -3238,11 +3249,13 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	
 	timer tmrOnStartDelay active: false interval: (onstartDelay * 1000)
 	timer tmrQueueRestart active: false interval: (restartReadReadQueue * 60 * 1000)
+	timer tmrNextProcess active: false interval: (nextProcess * 1000)
 	
 	timer tmrCounterBeforeStart active: false interval: 1000
 	timer tmrCounteRestart active: false interval: 1000
 	timer tmrCounterMaxRestart active: false interval: 1000
 	timer tmrCounterQueueRestart active: false interval: 1000
+	timer tmrCounterNextProcess active: false interval: 1000
 	
 	fn writeFile f s = (			
 		local f = createFile f mode: "wt"
@@ -3312,6 +3325,22 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		messageBox m title: "Warning!"
 		
 		return true
+	)
+	
+	fn statusMessageNextProcess create: false dispose: false = (
+		if (countdownNextProcess <= 0 or dispose) do (
+			tmrCounterNextProcess.active = false
+			return false
+		)
+		
+		countdownNextProcess -= 1
+		if (create) do (
+			tmrCounterNextProcess.active = false
+			tmrCounterNextProcess.active = true
+			countdownNextProcess = nextProcess
+		)
+		
+		lblStatus.caption = "Done. Take next file in " + (countdownNextProcess as string) + " seconds..."	
 	)
 	
 	fn statusMessageScanningWillStart create: false dispose: false = (
@@ -3472,8 +3501,17 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	
 	/* PROCESS FILES */
 	fn processFiles = (
-		local isCredentialsError = awsUploaderMgr.checkCredentialsError()
-		if (isCredentialsError) do return false
+		local isAwsCredentialsError = awsUploaderMgr.checkCredentialsError()
+		if (isAwsCredentialsError) do (
+			messageBox "AWS S3 credentials are missing or invalid. Check the settings and try again." title: "Error!"
+			return false
+		)
+		
+		local isRequestCredentialsError = requestMgr.checkCredentialsError()
+		if (isRequestCredentialsError) do (
+			messageBox "Web API credentials are missing or invalid. Check the settings and try again." title: "Error!"
+			return false
+		)
 		
 		if (cbxRunListenerErrorObserver.checked) do (
 			(listenerObserverWrapper()).run()
@@ -3500,7 +3538,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		
 		-- Is Queue empty (Restart)
 		if (jr.getString "message" != "queue_item_received") do (
-			restartProcessFiles msg: "Queue is empty. Restart in"		
+			restartProcessFiles msg: "Queue is empty. Restart in"
 			return false
 		)
 		
@@ -3658,6 +3696,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				join expectedExitFiles #(
 					d + slug + "-SKP.zip",
 					d + slug + "-SKP.json"
+					d + slug + "-SKP.png"
 				)
 				
 				skpMgr.convertMax2Skp()	
@@ -3678,7 +3717,11 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			requestMgr.postStatus #success txt: m
 		)
 		
+		--!!! here need upload functon
 		
+		
+		statusMessageNextProcess create: true
+		tmrNextProcess.active = true
 		
 		print expectedExitFiles
 		
@@ -3707,10 +3750,16 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			append errors #("Please Working Path!", true)
 		)
 		
-		local isCredentialsError = awsUploaderMgr.checkCredentialsError()
-		if (isCredentialsError) do (
+		local isAwsCredentialsError = awsUploaderMgr.checkCredentialsError()
+		if (isAwsCredentialsError) do (
 			btnStartStartupProcess.checked = false
 			append errors #("Invalid AWS credentials. Check the settings and try again!", true)
+		)
+		
+		local isRequestCredentialsError = requestMgr.checkCredentialsError()
+		if (isRequestCredentialsError) do (
+			btnStartStartupProcess.checked = false
+			append errors #("Invalid Web API credentials. Check the settings and try again!", true)
 		)
 		
 		if (cbxConvertToBlend.checked and not isBlenderExist) do append errors #("Not found Blender program!", false)
@@ -3745,8 +3794,13 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		) else (
 			forceDeleteFile startupScript	
 			tmrOnStartDelay.active = false
+			tmrNextProcess.active = false
+			tmrQueueRestart.active = false
+			
 			statusMessageRestartMaxIn dispose: true
 			statusMessageScanningWillStart dispose: true
+			statusMessageNextProcess dispose: true
+			statusMessageRestartQueueIn dispose: true
 			
 			lblStatus.caption =	"Autoconverting disabled!"
 			print "Autoconverting disabled!"
@@ -3775,6 +3829,10 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		)
 	)
 	
+	on _rGCAutoGLBConverter_Main close do (
+		(listenerObserverWrapper()).destroy()
+	)
+	
 	on tmrCounterBeforeStart tick do (
 		statusMessageScanningWillStart()
 	)
@@ -3785,6 +3843,11 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	
 	on tmrOnStartDelay tick do (
 		tmrOnStartDelay.active = false
+		processFiles retry: true
+	)
+	
+	on tmrNextProcess tick do (
+		tmrNextProcess.active = false
 		processFiles retry: true
 	)
 	
@@ -3799,6 +3862,10 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 )
 
 rollout _rGCAutoGLBConverter_Credentails "Credentails" category: 2 (
+	group "Web API" (
+		label lblWebApiSecretKey "Secret Key:" align: #left across: 2
+		edittext edtWebApiSecretKey "" align: #right width: 180
+	)
 	group "AWS S3" (
 		label lblAwsRegion "Region:" align: #left across: 2
 		edittext edtAwsRegion "" align: #right width: 180
@@ -3813,31 +3880,48 @@ rollout _rGCAutoGLBConverter_Credentails "Credentails" category: 2 (
 		edittext edtAwsSecretKey "" align: #right width: 180
 	)
 	
+	fn trim s = (
+		return trimLeft (trimRight s)
+	)
+	
 	fn loadSettings = (
+		requestMgr.apiKey = '*'.get "edtWebApiSecretKey"
+		
 		awsUploaderMgr.region = '*'.get "edtAwsRegion"
 		awsUploaderMgr.bucket = '*'.get "edtAwsBucket"
 		awsUploaderMgr.user = '*'.get "edtAwsUser"
 		awsUploaderMgr.key = '*'.get "edtAwsSecretKey"
+		
+		edtWebApiSecretKey.text = requestMgr.apiKey
 		
 		edtAwsRegion.text = awsUploaderMgr.region
 		edtAwsBucket.text = awsUploaderMgr.bucket
 		edtAwsUser.text = awsUploaderMgr.user
 		edtAwsSecretKey.text = awsUploaderMgr.key
 	)
-		
+	
+	on edtWebApiSecretKey changed v do (
+		v = trim v
+		'*'.add "edtWebApiSecretKey" v
+		requestMgr.apiKey = v
+	)	
 	on edtAwsRegion changed v do (
+		v = trim v
 		'*'.add "edtAwsRegion" v
 		awsUploaderMgr.region = v
 	)
 	on edtAwsBucket changed v do (
+		v = trim v
 		'*'.add "edtAwsBucket" v
 		awsUploaderMgr.bucket = v
 	)
 	on edtAwsUser changed v do (
+		v = trim v
 		'*'.add "edtAwsUser" v
 		awsUploaderMgr.user = v
 	)
 	on edtAwsSecretKey changed v do (
+		v = trim v
 		'*'.add "edtAwsSecretKey" v
 		awsUploaderMgr.key = v
 	)
