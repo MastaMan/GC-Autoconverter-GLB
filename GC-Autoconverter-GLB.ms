@@ -3260,9 +3260,9 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	global _MAX_ALLOWED_POLYS = 250000
 	
 	local maxProcessFilesInSession = 20 --20 files in a row
-	local onstartDelay = 20 --sec !!! 20
+	local onstartDelay = 20 --sec 
 	local restartProgramInterval = 60
-	local restartReadReadQueue = 1 -- min !!!!! 5
+	local restartReadQueue = 1 -- min !!!!! 5
 	local nextProcess = 10 -- sec
 		
 	local jsonReaderMgr = JsonReaderWrapper()
@@ -3271,7 +3271,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	local countdownNextProcess = nextProcess
 	local countdownBeforeStart = onstartDelay
 	local countdownMaxRestart = 60 -- sec
-	local countdownQueueRestart = restartReadReadQueue
+	local countdownQueueRestart = restartReadQueue
 	
 	group "Working Path" (
 		edittext edtInputPath "" readonly: true across: 2 align: #left fieldwidth: 215 height: 22		
@@ -3293,7 +3293,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	checkbutton btnStartStartupProcess "Autostart and Process" width: 260 height: 32 enabled: false highlightColor: (color 52 168 83)
 	
 	timer tmrOnStartDelay active: false interval: (onstartDelay * 1000)
-	timer tmrQueueRestart active: false interval: (restartReadReadQueue * 60 * 1000)
+	timer tmrQueueRestart active: false interval: (restartReadQueue * 60 * 1000)
 	timer tmrNextProcess active: false interval: (nextProcess * 1000)
 	
 	timer tmrCounterBeforeStart active: false interval: 1000
@@ -3439,7 +3439,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		countdownQueueRestart -= 1
 		if (create) do (
 			lastStatusMsg = msg
-			countdownQueueRestart = restartReadReadQueue * 60
+			countdownQueueRestart = restartReadQueue * 60
 			
 			tmrCounterQueueRestart.active = false
 			tmrCounterQueueRestart.active = true
@@ -3553,6 +3553,52 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		)
 
 		return names
+	)
+
+	fn getGeometryPolyStats nodes label: "" = (
+		local polys = (utilsWrapper()).polyCount nodes
+		return #(label, polys[1], polys[2], nodes.count)
+	)
+
+	fn getGeometryLayerPolyStats layerName = (
+		local layerObjects = #()
+
+		for o in geometry where isValidNode o and not isDeleted o do (
+			local objectLayerName = try (o.layer.name as string) catch ("")
+			if (objectLayerName == layerName) do append layerObjects o
+		)
+
+		return getGeometryPolyStats layerObjects label: layerName
+	)
+
+	fn formatPolyStats stat = (
+		return stat[1] + " (" + (stat[2] as string) + " polys, " + (stat[4] as string) + " objects)"
+	)
+
+	fn formatPolyStatsList stats = (
+		local items = #()
+		for stat in stats do append items (formatPolyStats stat)
+		return implodeString items
+	)
+
+	fn logLayerPolyStats layerNames = (
+		requestMgr.postLog txt: ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
+
+		for layerName in layerNames do (
+			local stat = getGeometryLayerPolyStats layerName
+			requestMgr.postLog txt: ("Layer polygon count: " + (formatPolyStats stat))
+		)
+	)
+
+	fn getLayersOverPolyLimit layerNames = (
+		local failed = #()
+
+		for layerName in layerNames do (
+			local stat = getGeometryLayerPolyStats layerName
+			if (stat[2] > _MAX_ALLOWED_POLYS) do append failed stat
+		)
+
+		return failed
 	)
 
 	fn keepOnlyGeometryFromLayer layerName = (
@@ -3729,9 +3775,8 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		requestMgr.postLog txt: "Source file downloaded. Validating file..."
 		lblStatus.caption = "Validating downloaded file..."
 		
-		-- !!! uncomment this
 		-- Tell that we try conversion
-		--requestMgr.postAttempt()
+		requestMgr.postAttempt()
 		
 		-- Is file not valid immediately request next file
 		if (not downloadMgr.isValidFile file) do (
@@ -3775,15 +3820,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			return false
 		)
 		
-		local polys = (utilsWrapper()).polyCount objects
-		if (polys[1] >= _MAX_ALLOWED_POLYS) do (
-			requestMgr.postLog txt: "[Error] Polygon count exceeds the allowed limit."
-			requestMgr.postStatus #error txt: ("The polygon count exceeds the allowed limit: " + _MAX_ALLOWED_POLYS as string)
-			lblStatus.caption = "Polygon limit exceeded. Skipping file."
-			processFiles()
-			return false			
-		)
-		
 		local expectedExitFiles = #()
 		local layerNames = getGeometryLayerNames()
 		local splitByLayers = layerNames.count > 1
@@ -3792,6 +3828,18 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		if (splitByLayers and doesFileExist sourceSceneFile) then (
 			requestMgr.postLog txt: ("Scene has " + (layerNames.count as string) + " layers with objects. Converting each layer separately.")
+			logLayerPolyStats layerNames
+
+			local failedLayerStats = getLayersOverPolyLimit layerNames
+			if (failedLayerStats.count > 0) do (
+				local m = "Layer polygon limit exceeded. Limit per layer: " + (_MAX_ALLOWED_POLYS as string) + ". Failed layers: " + (formatPolyStatsList failedLayerStats) + "."
+				requestMgr.postLog txt: ("[Error] " + m)
+				requestMgr.postStatus #error txt: m
+				lblStatus.caption = "Layer polygon limit exceeded. Skipping file."
+				processFiles()
+				return false
+			)
+
 			r.del = undefined
 
 			for i in 1 to layerNames.count do (
@@ -3819,6 +3867,18 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		) else (
 			if (splitByLayers and not doesFileExist sourceSceneFile) do (
 				requestMgr.postLog txt: "[Warning] Multiple layers were detected, but the source scene file could not be reloaded. Converting the whole scene."
+			)
+
+			local sceneStat = getGeometryPolyStats (geometry as array) label: "Whole scene"
+			requestMgr.postLog txt: ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
+			requestMgr.postLog txt: ("Scene polygon count: " + (formatPolyStats sceneStat))
+			if (sceneStat[2] > _MAX_ALLOWED_POLYS) do (
+				local m = "The polygon count exceeds the allowed limit. Limit: " + (_MAX_ALLOWED_POLYS as string) + ". Scene polygons: " + (sceneStat[2] as string) + "."
+				requestMgr.postLog txt: ("[Error] " + m)
+				requestMgr.postStatus #error txt: m
+				lblStatus.caption = "Polygon limit exceeded. Skipping file."
+				processFiles()
+				return false
 			)
 
 			convertSceneVariant r (slug + "-GLB") (slug + "-BLEND") (slug + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles
@@ -3863,13 +3923,18 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		
 		if (uploadedFiles.count == expectedExitFiles.count) then (
 			local m = "All files were uploaded to S3 successfully: " + (implodeString uploadedFiles)
+			local successMessage = "Uploaded successfully!"
 			lblStatus.caption = "All files were uploaded to S3."
 			requestMgr.postStatus #uploaded txt: m
 			requestMgr.postLog txt: m
+			requestMgr.postLog txt: successMessage
+			requestMgr.postStatus #success txt: successMessage
 		) else if (uploadedFiles.count > 0) then (
 			local m = "Not all files were uploaded to S3. Failed files: " + (implodeString failedFiles)
+			local successMessage = "Uploaded successfully, but conveted not all files!"
 			lblStatus.caption = "Some files were not uploaded."
 			requestMgr.postStatus #uploaded txt: m
+			requestMgr.postStatus #success txt: successMessage
 			requestMgr.postLog txt: m
 		) else (
 			local m = "No files were uploaded to S3. Failed files: " + (implodeString failedFiles)
