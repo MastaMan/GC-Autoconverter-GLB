@@ -3543,6 +3543,105 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		
 		return result
 	)
+
+	fn getGeometryLayerNames = (
+		local names = #()
+
+		for o in geometry where isValidNode o and not isDeleted o do (
+			local layerName = try (o.layer.name as string) catch ("")
+			if (layerName != "") do appendIfUnique names layerName
+		)
+
+		return names
+	)
+
+	fn keepOnlyGeometryFromLayer layerName = (
+		local nodesToDelete = #()
+
+		for o in geometry where isValidNode o and not isDeleted o do (
+			local objectLayerName = try (o.layer.name as string) catch ("")
+			if (objectLayerName != layerName) do append nodesToDelete o
+		)
+
+		if (nodesToDelete.count > 0) do try (delete nodesToDelete) catch ()
+		return (geometry as array).count
+	)
+
+	fn resetLoadedSceneState = (
+		try (max unhide all) catch ()
+		try (for o in objects do o.isFrozen = false) catch ()
+		try (max views redraw) catch ()
+	)
+
+	fn convertSceneVariant scn glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles = (
+		lblStatus.caption = "Preparing scene: BoxTrick, Attach All, Set Pivot..."
+		requestMgr.postLog txt: ("Preparing scene for conversion: " + glbName)
+
+		explodeAllGroups()
+		disableIsolineDisplayForSmooth()
+		boxTrick()
+		resetXForAllObjects()
+		attachSceneObjects()
+		setSnenePivotBottom()
+
+		scn.name = glbName
+
+		join expectedExitFiles #(
+			d + glbName + ".glb",
+			d + glbName + ".png",
+			d + glbName + ".json",
+			d + glbName + "-WEBGL.glb"
+		)
+
+		lblStatus.caption = "Converting to GLB..."
+		requestMgr.postLog txt: ("Converting to GLB: " + glbName)
+		local glb = ::API_BATCH_GLB_CONVERTER.run scn: scn out: d ao: ao isNormalizeTiling: false
+
+		-- Convert to Blender
+		if (cbxConvertToBlend.checked) do (
+			if (blendGLBMgr.isBlenderExist()) then (
+				lblStatus.caption = "Converting to Blender..."
+				requestMgr.postLog txt: ("Converting to Blender: " + blendName)
+
+				blendGLBMgr.init glb: glb name: blendName
+				join expectedExitFiles #(
+					d + blendName + ".zip",
+					d + blendName + ".json",
+					d + blendName + ".png"
+				)
+
+				blendGLBMgr.convertGLB2Blend()
+				--blendGLBMgr.makeScreenshot()
+				blendGLBMgr.makeRender()
+				blendGLBMgr.makeArchive()
+				blendGLBMgr.makeJson()
+			) else (
+				requestMgr.postLog txt: "[Error] Blender conversion is enabled, but Blender was not found."
+			)
+		)
+
+		-- Convert to SketchUp
+		if (cbxConvertToSketchup.checked) do (
+			if (skpMgr.isSketchupExist()) then (
+				lblStatus.caption = "Converting to SketchUp..."
+				requestMgr.postLog txt: ("Converting to SketchUp: " + skpName)
+
+				skpMgr.init name: skpName glb: glb
+				join expectedExitFiles #(
+					d + skpName + ".zip",
+					d + skpName + ".json",
+					d + skpName + ".png"
+				)
+
+				skpMgr.convertMax2Skp()
+				skpMgr.makeJson()
+			) else (
+				requestMgr.postLog txt: "[Error] SketchUp conversion is enabled, but SketchUp was not found."
+			)
+		)
+
+		return glb
+	)
 	
 	/* PROCESS FILES */
 	fn processFiles = (
@@ -3685,70 +3784,44 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			return false			
 		)
 		
-		lblStatus.caption = "Preparing scene: BoxTrick, Attach All, Set Pivot..."
-		requestMgr.postLog txt: "Preparing scene: BoxTrick, Attach All, Set Pivot..."
-		
-		explodeAllGroups()
-		disableIsolineDisplayForSmooth()
-		boxTrick()
-		resetXForAllObjects()
-		attachSceneObjects()
-		setSnenePivotBottom()
-		
-		r.name = slug + "-GLB"
-		
-		local expectedExitFiles = #(
-			d + slug + "-GLB.glb",
-			d + slug + "-GLB.png",
-			d + slug + "-GLB.json",
-			d + slug + "-GLB-WEBGL.glb"
-		)
-		
-		lblStatus.caption = "Converting to GLB..."
-		requestMgr.postLog txt: "Converting to GLB..."
-		local glb = ::API_BATCH_GLB_CONVERTER.run scn: r out: d ao: ao isNormalizeTiling: false
-		
-		-- Convert to Blender
-		if (cbxConvertToBlend.checked) do (
-			if (blendGLBMgr.isBlenderExist()) then (
-				lblStatus.caption = "Converting to Blender..."
-				requestMgr.postLog txt: "Converting to Blender..."
-				
-				blendGLBMgr.init glb: glb name: (slug + "-BLEND")
-				join expectedExitFiles #(
-					d + slug + "-BLEND.zip",
-					d + slug + "-BLEND.json",
-					d + slug + "-BLEND.png"
+		local expectedExitFiles = #()
+		local layerNames = getGeometryLayerNames()
+		local splitByLayers = layerNames.count > 1
+		local sourceSceneFile = maxFilePath + maxFileName
+		local sourceDeleteDir = r.del
+
+		if (splitByLayers and doesFileExist sourceSceneFile) then (
+			requestMgr.postLog txt: ("Scene has " + (layerNames.count as string) + " layers with objects. Converting each layer separately.")
+			r.del = undefined
+
+			for i in 1 to layerNames.count do (
+				local layerName = layerNames[i]
+				local suffix = "-" + (i as string)
+				local glbName = slug + "-GLB" + suffix
+				local blendName = slug + "-BLEND" + suffix
+				local skpName = slug + "-SKP" + suffix
+
+				lblStatus.caption = "Loading layer " + (i as string) + " of " + (layerNames.count as string) + "..."
+				requestMgr.postLog txt: ("Loading source scene for layer " + (i as string) + ": " + layerName)
+				loadMaxFile sourceSceneFile quiet: true
+				resetLoadedSceneState()
+
+				local objectsCount = keepOnlyGeometryFromLayer layerName
+				if (objectsCount == 0) then (
+					requestMgr.postLog txt: ("[Warning] Layer has no geometry after reload. Skipping layer: " + layerName)
+				) else (
+					requestMgr.postLog txt: ("Converting layer " + (i as string) + " of " + (layerNames.count as string) + ": " + layerName)
+					convertSceneVariant r glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles
 				)
-				
-				blendGLBMgr.convertGLB2Blend()
-				--blendGLBMgr.makeScreenshot()
-				blendGLBMgr.makeRender()
-				blendGLBMgr.makeArchive()
-				blendGLBMgr.makeJson()
-			) else (
-				requestMgr.postLog txt: "[Error] Blender conversion is enabled, but Blender was not found."
-			)			
-		)
-		
-		-- Convert to SketchUp
-		if (cbxConvertToSketchup.checked) do (
-			if (skpMgr.isSketchupExist()) then (
-				lblStatus.caption = "Converting to SketchUp..."
-				requestMgr.postLog txt: "Converting to SketchUp..."
-				
-				skpMgr.init name: (slug + "-SKP") glb: glb
-				join expectedExitFiles #(
-					d + slug + "-SKP.zip",
-					d + slug + "-SKP.json",
-					d + slug + "-SKP.png"
-				)
-				
-				skpMgr.convertMax2Skp()	
-				skpMgr.makeJson()	
-			) else (
-				requestMgr.postLog txt: "[Error] SketchUp conversion is enabled, but SketchUp was not found."
-			)			
+			)
+
+			if (sourceDeleteDir != undefined) do ::API_BATCH_GLB_CONVERTER.rmDir sourceDeleteDir
+		) else (
+			if (splitByLayers and not doesFileExist sourceSceneFile) do (
+				requestMgr.postLog txt: "[Warning] Multiple layers were detected, but the source scene file could not be reloaded. Converting the whole scene."
+			)
+
+			convertSceneVariant r (slug + "-GLB") (slug + "-BLEND") (slug + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles
 		)
 		
 		local cntExistingFiles = checkExistingFiles expectedExitFiles

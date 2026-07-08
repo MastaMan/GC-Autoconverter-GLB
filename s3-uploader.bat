@@ -16,6 +16,7 @@ set s3key=
 set accessKey=
 set secretKey=
 set logFile=
+set curlExe=%~dp0curl.exe
 set statusFile=%TEMP%\s3-upload-%RANDOM%-%RANDOM%.status
 set responseFile=%TEMP%\s3-upload-%RANDOM%-%RANDOM%.response
 set errorFile=%TEMP%\s3-upload-%RANDOM%-%RANDOM%.error
@@ -74,13 +75,13 @@ if not exist "%localFile%" (
 	exit /b 3
 )
 
-if not exist "c:\Windows\System32\curl.exe" (
-	echo Error: curl.exe not found
-	echo Error: curl.exe not found>"%logFile%"
+if not exist "%curlExe%" (
+	echo Error: local curl.exe not found: "%curlExe%"
+	echo Error: local curl.exe not found: "%curlExe%">"%logFile%"
 	exit /b 4
 )
 
-c:\Windows\System32\curl.exe -sS -X PUT -T "%localFile%" --user "%accessKey%:%secretKey%" --aws-sigv4 "aws:amz:%region%:s3" -w "%%{http_code}" -o "%responseFile%" "https://%bucket%.s3.%region%.amazonaws.com/%s3key%" > "%statusFile%" 2> "%errorFile%"
+"%curlExe%" -sS -X PUT -T "%localFile%" --user "%accessKey%:%secretKey%" --aws-sigv4 "aws:amz:%region%:s3" -w "%%{http_code}" -o "%responseFile%" "https://%bucket%.s3.%region%.amazonaws.com/%s3key%" > "%statusFile%" 2> "%errorFile%"
 
 if errorlevel 1 (
 	echo CURL_ERROR:>"%logFile%"
