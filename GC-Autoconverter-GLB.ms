@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.0.2
+VERSION=1.0.3
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -19,6 +19,9 @@ Auto Converter to GLB/SKP/BLEND script=
 [1.0.2]
 + Added: Test connections in Credentials =
 
+[1.0.3]
++ Added: Support Telegrams notifications =
+
 [FILES]
 Install.mcr=
 jpegoptim.exe=
@@ -33,6 +36,7 @@ xnormal.bat=deleted
 xnormal.xml=deleted
 lowes-viewer.zip=deleted
 model-viewer.zip=
+api-error.jpg=
 chrome-screenshot.bat=
 chrome-preview.bat=
 chrome.bat=deleted
@@ -55,6 +59,8 @@ blender-render.py=
 clamp-colors.bat=
 contrast.bat=
 s3-uploader.bat=
+telegram-uploader.bat=
+test-telegram-uploader.bat=
 curl.exe=
 web-request.bat=deleted
 sketchup-convert.bat=
@@ -932,6 +938,111 @@ struct awsUploaderWrapper (
 
 global awsUploaderMgr = awsUploaderWrapper()
 
+struct TelegramWrapper (
+	currentPath = getFileNamePath (getThisScriptFileName()),
+	bat = currentPath + "telegram-uploader.bat",
+	token = "",
+	chatId = "",
+	lastExitCode = 0,
+	lastError = "",
+
+	fn checkCredentialsError = (
+		if (token.count < 20) do return true
+		if (chatId.count < 3) do return true
+		if (not doesFileExist bat) do return true
+
+		return false
+	),
+
+	fn writeTextFile f txt = (
+		local stream = undefined
+		try (
+			stream = dotNetObject "System.IO.StreamWriter" f false ((dotNetClass "System.Text.Encoding").GetEncoding("UTF-8"))
+			stream.Write (txt as string)
+			stream.Close()
+			return true
+		) catch (
+			try (stream.Close()) catch ()
+			return false
+		)
+	),
+
+	fn readTextFile f = (
+		if (not doesFileExist f) do return ""
+		local stream = undefined
+		try (
+			stream = dotNetObject "System.IO.StreamReader" f ((dotNetClass "System.Text.Encoding").GetEncoding("UTF-8"))
+			local txt = stream.ReadToEnd()
+			stream.Close()
+			return txt
+		) catch (
+			try (stream.Close()) catch ()
+			return ""
+		)
+	),
+
+	fn send txt image: "" = (
+		lastExitCode = 0
+		lastError = ""
+
+		if (this.checkCredentialsError()) do (
+			lastError = "Telegram credentials are missing or invalid, or telegram-uploader.bat was not found."
+			return false
+		)
+		if (txt == undefined) do txt = ""
+
+		local stamp = timestamp() as string
+		local textFile = (getDir #temp) + "\\telegram-message-" + stamp + ".txt"
+		local logFile = (getDir #temp) + "\\telegram-send-" + stamp + ".log"
+		if (not (writeTextFile textFile txt)) do (
+			lastError = "Cannot write temporary Telegram message file."
+			return false
+		)
+
+		local args = token + ";" + chatId + ";" + textFile + ";" + image + ";" + logFile
+		local cmd = "telegram-uploader.bat \"" + args + "\""
+
+		local curDir = sysInfo.currentDir
+		local exitcode = 0
+		sysInfo.currentDir = currentPath
+		try (
+			HiddenDOSCommand cmd exitCode: &exitcode donotwait: false
+		) catch (
+			exitcode = -1
+		)
+		sysInfo.currentDir = curDir
+
+		lastExitCode = exitcode
+		lastError = this.readTextFile logFile
+		try (deleteFile textFile) catch ()
+		try (deleteFile logFile) catch ()
+
+		if (exitcode != 0) do (
+			if (lastError == "") do lastError = "curl exit code: " + (exitcode as string)
+			return false
+		)
+
+		return true
+	),
+
+	fn sendMessage txt = (
+		return this.send txt
+	),
+
+	fn sendPhoto txt image = (
+		return this.send txt image: image
+	),
+
+	fn getLastError = (
+		local msg = ""
+		if (lastError != "") do msg += lastError
+		if (msg == "") do msg = "Unknown Telegram error."
+		return msg
+	)
+)
+
+global telegramMgr = TelegramWrapper()
+
 struct settingsWrapper (
 	currScript = getThisScriptFileName(),
 	name = getFilenameFile currScript,
@@ -1009,7 +1120,9 @@ fn migrateCredentialsSettings = (
 		#("AwsRegion", "edtAwsRegion"),
 		#("AwsBucket", "edtAwsBucket"),
 		#("AwsUser", "edtAwsUser"),
-		#("AwsSecretKey", "edtAwsSecretKey")
+		#("AwsSecretKey", "edtAwsSecretKey"),
+		#("TelegramToken", "edtTelegramToken"),
+		#("TelegramChatId", "edtTelegramChatId")
 	)
 
 	if (('*'.get (getCredentialsKey #prod "WebApiBaseUrl")) == "") do (
@@ -1047,6 +1160,9 @@ fn applyCredentialProfile mode = (
 	awsUploaderMgr.bucket = getCredentialValue mode "AwsBucket"
 	awsUploaderMgr.user = getCredentialValue mode "AwsUser"
 	awsUploaderMgr.key = getCredentialValue mode "AwsSecretKey"
+
+	telegramMgr.token = getCredentialValue mode "TelegramToken"
+	telegramMgr.chatId = getCredentialValue mode "TelegramChatId"
 )
 
 struct utilsWrapper (
@@ -3385,6 +3501,8 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	local countdownBeforeStart = onstartDelay
 	local countdownMaxRestart = 60 -- sec
 	local countdownQueueRestart = restartReadQueue
+	local apiQueueFailureCount = 0
+	local apiQueueTelegramAlertSent = false
 
 	group "Working Path" (
 		edittext edtInputPath "" readonly: true across: 2 align: #left fieldwidth: 215 height: 22
@@ -3602,6 +3720,45 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		statusMessageRestartQueueIn create: true msg: msg
 		tmrQueueRestart.active = false
 		tmrQueueRestart.active = true
+	)
+
+	fn shortenText txt maxLen: 1200 = (
+		if (txt == undefined) do return ""
+		txt = txt as string
+		if (txt.count > maxLen) do txt = (substring txt 1 maxLen) + "..."
+		return txt
+	)
+
+	fn sendApiQueueFailureTelegram response modeLabel = (
+		if (apiQueueTelegramAlertSent) do return false
+
+		apiQueueTelegramAlertSent = true
+
+		local txt = "GC Autoconverter GLB API error\n\n"
+		txt += "Mode: " + modeLabel + "\n"
+		txt += "Queue API failed 3 times in a row.\n"
+		txt += "URL: " + requestMgr.apiGetQueue + "\n\n"
+		txt += "Response:\n" + (shortenText response)
+
+		if (telegramMgr.checkCredentialsError()) do (
+			print "[Telegram] API error alert was not sent: Telegram credentials are missing or invalid."
+			return false
+		)
+
+		local image = (getFileNamePath (getThisScriptFileName())) + "api-error.jpg"
+		local isOk = if (doesFileExist image) then (
+			telegramMgr.sendPhoto txt image
+		) else (
+			telegramMgr.sendMessage txt
+		)
+
+		if (isOk) then (
+			print "[Telegram] API error alert sent."
+		) else (
+			print ("[Telegram] API error alert failed: " + telegramMgr.getLastError())
+		)
+
+		return isOk
 	)
 
 	fn explodeAllGroups = (
@@ -3874,9 +4031,15 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		-- Is correct JSON (Restart)
 		local isSuccess = jr.getBool "success"
 		if (not isSuccess) do (
+			apiQueueFailureCount += 1
+			if (apiQueueFailureCount >= 3 and not apiQueueTelegramAlertSent) do (
+				sendApiQueueFailureTelegram q credentialsModeLabel
+			)
 			restartProcessFiles msg: "Cannot retrieve a request from the API. Restarting in"
 			return false
 		)
+
+		apiQueueFailureCount = 0
 
 		-- Is Queue empty (Restart)
 		if (jr.getString "message" != "queue_item_received") do (
@@ -4275,6 +4438,16 @@ rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 		button btnTestAws "Test" width: 80 align: #right
 	)
 
+	group "Telegram" (
+		label lblTelegramToken "Bot Token:" align: #left across: 2
+		edittext edtTelegramToken "" align: #right width: 180
+
+		label lblTelegramChatId "Chat ID:" align: #left across: 2
+		edittext edtTelegramChatId "" align: #right width: 180
+
+		button btnTestTelegram "Test" width: 80 align: #right
+	)
+
 	fn trim s = (
 		return trimLeft (trimRight s)
 	)
@@ -4305,6 +4478,8 @@ rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 		'*'.add (getCredentialsKey mode "AwsBucket") (trim edtAwsBucket.text)
 		'*'.add (getCredentialsKey mode "AwsUser") (trim edtAwsUser.text)
 		'*'.add (getCredentialsKey mode "AwsSecretKey") (trim edtAwsSecretKey.text)
+		'*'.add (getCredentialsKey mode "TelegramToken") (trim edtTelegramToken.text)
+		'*'.add (getCredentialsKey mode "TelegramChatId") (trim edtTelegramChatId.text)
 
 		if (mode == (getCredentialsMode())) do applyCredentialProfile mode
 	)
@@ -4323,6 +4498,8 @@ rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 		edtAwsBucket.text = getCredentialValue mode "AwsBucket"
 		edtAwsUser.text = getCredentialValue mode "AwsUser"
 		edtAwsSecretKey.text = getCredentialValue mode "AwsSecretKey"
+		edtTelegramToken.text = getCredentialValue mode "TelegramToken"
+		edtTelegramChatId.text = getCredentialValue mode "TelegramChatId"
 
 		isLoadingCredentials = false
 	)
@@ -4378,6 +4555,29 @@ rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 		return true
 	)
 
+	fn testTelegramCredentials = (
+		saveSettings mode: activeCredentialMode
+		applyCredentialProfile activeCredentialMode
+
+		local modeLabel = getCredentialsModeLabel activeCredentialMode
+
+		if (telegramMgr.checkCredentialsError()) do (
+			messageBox (modeLabel + " Telegram credentials are missing or invalid.") title: "Telegram Test"
+			return false
+		)
+
+		local isTelegramSent = telegramMgr.sendMessage ("GC Autoconverter GLB Telegram test: " + modeLabel)
+		if (isTelegramSent) then (
+			messageBox (modeLabel + " Telegram test message sent.") title: "Telegram Test"
+			return true
+		) else (
+			local err = telegramMgr.getLastError()
+			print ("[Telegram] Test failed: " + err)
+			messageBox (modeLabel + " Telegram test failed:\n\n" + err) title: "Telegram Test"
+			return false
+		)
+	)
+
 	on tabControl SelectedIndexChanged args do (
 		if (not isLoadingCredentials) do (
 			saveSettings mode: activeCredentialMode
@@ -4428,12 +4628,30 @@ rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 		)
 	)
 
+	on edtTelegramToken changed v do (
+		if (not isLoadingCredentials) do (
+			'*'.add (getCredentialsKey activeCredentialMode "TelegramToken") (trim v)
+			if (activeCredentialMode == (getCredentialsMode())) do applyCredentialProfile activeCredentialMode
+		)
+	)
+
+	on edtTelegramChatId changed v do (
+		if (not isLoadingCredentials) do (
+			'*'.add (getCredentialsKey activeCredentialMode "TelegramChatId") (trim v)
+			if (activeCredentialMode == (getCredentialsMode())) do applyCredentialProfile activeCredentialMode
+		)
+	)
+
 	on btnTestWebApi pressed do (
 		testWebApiCredentials()
 	)
 
 	on btnTestAws pressed do (
 		testAwsCredentials()
+	)
+
+	on btnTestTelegram pressed do (
+		testTelegramCredentials()
 	)
 
 	on _rGCAutoGLBConverter_Credentails open do (
