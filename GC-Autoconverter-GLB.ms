@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.0.4
+VERSION=1.0.5
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -25,6 +25,14 @@ Auto Converter to GLB/SKP/BLEND script=
 [1.0.4]
 - BugFix: SKP withou archive =
 
+[1.0.5]
++ Added: Telegram success/error processing reports with screenshots and technical logs=
++ Added: result_json file listing for successful uploads=
++ Added: 3ds Max restart after 20 processed queue items=
++ Added: Remaining files before restart indicator=
++ Added: error.jpg fallback image for Telegram error reports=
++ Improved: JSON string escaping for API payloads=
+
 [FILES]
 Install.mcr=
 jpegoptim.exe=
@@ -40,6 +48,7 @@ xnormal.xml=deleted
 lowes-viewer.zip=deleted
 model-viewer.zip=
 api-error.jpg=
+error.jpg=
 chrome-screenshot.bat=
 chrome-preview.bat=
 chrome.bat=deleted
@@ -168,6 +177,16 @@ struct JsonWrapper (
 		s.Close()
 	),
 
+	fn escapeJsonString s = (
+		s = s as string
+		s = substituteString s "\\" "\\\\"
+		s = substituteString s "\"" "\\\""
+		s = substituteString s "\r" "\\r"
+		s = substituteString s "\n" "\\n"
+		s = substituteString s "\t" "\\t"
+		return s
+	),
+
 	fn buildJson data = (
 		local t = "\t"
 		local n = "\n"
@@ -183,7 +202,7 @@ struct JsonWrapper (
 			if (p[2] == "true" or p[2] == "false") do qq = ""
 
 			case classOf p[2] of (
-				String:  j += qq + p[2] + qq + comma
+				String:  j += qq + (escapeJsonString p[2]) + qq + comma
 				Array: (
 					j += "[" + n
 					for ii in 1 to p[2].count do (
@@ -196,11 +215,11 @@ struct JsonWrapper (
 									local pp = z[iii]
 									local comma3 = if (iii != z.count) then ("," + n) else n
 
-									j += t + t + t + q + pp[1] + q + ": \"" + pp[2] + q + comma3
+									j += t + t + t + q + pp[1] + q + ": \"" + (escapeJsonString pp[2]) + q + comma3
 								)
 							j += t + t + "}" + comma2
 						) else (
-							j += t + t + q + z + q + comma2
+							j += t + t + q + (escapeJsonString z) + q + comma2
 						)
 					)
 					j += t + "]" + comma
@@ -657,7 +676,7 @@ struct requestWrapper (
 	fn getQueue = (
 		return this.downloadString apiGetQueue
 	),
-	fn postStatus status txt: "" = (
+	fn postStatus status txt: "" result_json: undefined = (
 		local s = case status of (
 			#in_progress: status as string
 			#downloaded: status as string
@@ -674,6 +693,10 @@ struct requestWrapper (
 			#("autoconvertion_id", a_id),
 			#("status_id", s),
 			#("txt", txt)
+		)
+
+		if (result_json != undefined) do (
+			append data #("result_json", result_json)
 		)
 
 		return this.post apiPostStatus data
@@ -3505,8 +3528,10 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	local countdownBeforeStart = onstartDelay
 	local countdownMaxRestart = 60 -- sec
 	local countdownQueueRestart = restartReadQueue
+	local processedFilesInSession = 0
 	local apiQueueFailureCount = 0
 	local apiQueueTelegramAlertSent = false
+	local processTelegramLogs = #()
 
 	group "Working Path" (
 		edittext edtInputPath "" readonly: true across: 2 align: #left fieldwidth: 215 height: 22
@@ -3538,7 +3563,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	timer tmrNextProcess active: false interval: (nextProcess * 1000)
 
 	timer tmrCounterBeforeStart active: false interval: 1000
-	timer tmrCounteRestart active: false interval: 1000
+	timer tmrCounteRestart active: false interval: (restartProgramInterval * 1000)
 	timer tmrCounterMaxRestart active: false interval: 1000
 	timer tmrCounterQueueRestart active: false interval: 1000
 	timer tmrCounterNextProcess active: false interval: 1000
@@ -3673,7 +3698,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		countdownMaxRestart -= 1
 		if (create) do (
-			countdownMaxRestart = restartProgramInterval * 1000
+			countdownMaxRestart = restartProgramInterval
 			tmrCounterMaxRestart.active = false
 			tmrCounterMaxRestart.active = true
 		)
@@ -3724,6 +3749,50 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		statusMessageRestartQueueIn create: true msg: msg
 		tmrQueueRestart.active = false
 		tmrQueueRestart.active = true
+	)
+
+	fn restart3dsMax = (
+		local maxExe = (pathConfig.GetDir #maxroot) + "3dsmax.exe"
+		local args = maxExe + ";"
+		local cmd = "restart.bat \"" + args + "\""
+		local curDir = sysInfo.currentDir
+
+		sysInfo.currentDir = currentPath
+		hiddenDosCommand cmd donotwait: true
+		sysInfo.currentDir = curDir
+	)
+
+	fn schedule3dsMaxRestartAfterProcessedLimit = (
+		local msg = "Processed files limit reached (" + (processedFilesInSession as string) + " of " + (maxProcessFilesInSession as string) + "). Restarting 3ds Max..."
+		print msg
+		requestMgr.postLog txt: msg
+
+		tmrNextProcess.active = false
+		tmrQueueRestart.active = false
+		tmrOnStartDelay.active = false
+
+		statusMessageNextProcess dispose: true
+		statusMessageRestartQueueIn dispose: true
+		statusMessageRestartMaxIn create: true
+
+		tmrCounteRestart.active = false
+		tmrCounteRestart.active = true
+	)
+
+	fn getRemainingFilesInSession = (
+		local remaining = maxProcessFilesInSession - processedFilesInSession
+		if (remaining < 0) do remaining = 0
+		return remaining
+	)
+
+	fn updateRemainingFilesLabel = (
+		lblSlug.caption = "Files before restart: " + ((getRemainingFilesInSession()) as string) + " of " + (maxProcessFilesInSession as string)
+	)
+
+	fn markProcessedFileInSession = (
+		processedFilesInSession += 1
+		updateRemainingFilesLabel()
+		postProcessLog ("Processed files in this 3ds Max session: " + (processedFilesInSession as string) + " of " + (maxProcessFilesInSession as string) + ". Remaining before restart: " + ((getRemainingFilesInSession()) as string))
 	)
 
 	fn shortenText txt maxLen: 1200 = (
@@ -3844,6 +3913,149 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		return result
 	)
 
+	fn buildUploadedFilesResultJson uploadedFiles = (
+		local glbFiles = #()
+		local blendFiles = #()
+		local skpFiles = #()
+		local regex = dotNetClass "System.Text.RegularExpressions.Regex"
+
+		for f in uploadedFiles do (
+			local fileName = filenameFromPath f
+			local lowerName = toLower (getFilenameFile fileName)
+
+			if (regex.IsMatch lowerName "-glb(-[0-9]+)?(-webgl)?$") then (
+				append glbFiles fileName
+			) else if (regex.IsMatch lowerName "-blend(-[0-9]+)?$") then (
+				append blendFiles fileName
+			) else if (regex.IsMatch lowerName "-skp(-[0-9]+)?$") then (
+				append skpFiles fileName
+			)
+		)
+
+		local data = #()
+		if (glbFiles.count > 0) do append data #("GLB", glbFiles)
+		if (blendFiles.count > 0) do append data #("BLEND", blendFiles)
+		if (skpFiles.count > 0) do append data #("SKP", skpFiles)
+
+		return (JsonWrapper()).buildJson data
+	)
+
+	fn resetProcessTelegramLogs = (
+		processTelegramLogs = #()
+	)
+
+	fn addProcessTelegramLog txt = (
+		if (txt == undefined) do txt = ""
+		append processTelegramLogs (txt as string)
+	)
+
+	fn postProcessLog txt = (
+		addProcessTelegramLog txt
+		requestMgr.postLog txt: txt
+	)
+
+	fn implodeLines lines maxChars: 3500 = (
+		local result = ""
+
+		for line in lines do (
+			local nextLine = line as string
+			if ((result.count + nextLine.count + 1) > maxChars) do exit
+			if (result != "") do result += "\n"
+			result += nextLine
+		)
+
+		if (lines.count > 0 and result == "") do result = substring (lines[1] as string) 1 maxChars
+		return result
+	)
+
+	fn findFirstGLBScreenshot expectedExitFiles = (
+		local regex = dotNetClass "System.Text.RegularExpressions.Regex"
+
+		for f in expectedExitFiles do (
+			local name = toLower (getFilenameFile f)
+			if (toLower (getFilenameType f) == ".png" and regex.IsMatch name "-glb(-[0-9]+)?$" and doesFileExist f) do return f
+		)
+
+		for f in expectedExitFiles do (
+			if (toLower (getFilenameType f) == ".png" and doesFileExist f) do return f
+		)
+
+		return ""
+	)
+
+	fn sendProcessingTelegramReport isSuccess slug sourceName expectedExitFiles uploadedFiles failedFiles resultJson errorMessage: "" = (
+		if (telegramMgr.checkCredentialsError()) do (
+			print "[Telegram] Processing report was not sent: Telegram credentials are missing or invalid."
+			return false
+		)
+
+		local modeLabel = getCredentialsModeLabel (getCredentialsMode())
+		local title = if (isSuccess) then "GC Autoconverter GLB: uploaded successfully" else "GC Autoconverter GLB: processing failed"
+		local txt = title + "\n\n"
+		txt += "Mode: " + modeLabel + "\n"
+		txt += "Slug: " + slug + "\n"
+		txt += "Original file: " + sourceName + "\n"
+		txt += "Model ID: " + (requestMgr.model_id as string) + "\n"
+		txt += "Version ID: " + (requestMgr.version_id as string) + "\n"
+		txt += "Expected files: " + (expectedExitFiles.count as string) + "\n"
+		txt += "Uploaded files: " + (uploadedFiles.count as string) + "\n"
+		txt += "Failed files: " + (failedFiles.count as string) + "\n"
+
+		if (errorMessage != "") do txt += "\nError:\n" + (shortenText errorMessage maxLen: 500) + "\n"
+		if (resultJson != "") do txt += "\nResult JSON:\n" + (shortenText resultJson maxLen: 700) + "\n"
+
+		txt += "\nUploaded:\n" + (shortenText (implodeString uploadedFiles) maxLen: 500) + "\n"
+		if (failedFiles.count > 0) do txt += "\nFailed:\n" + (shortenText (implodeString failedFiles) maxLen: 500) + "\n"
+		txt += "\nConversion log:\n" + (implodeLines processTelegramLogs maxChars: 2500)
+
+		local image = if (isSuccess) then (
+			findFirstGLBScreenshot expectedExitFiles
+		) else (
+			(getFileNamePath (getThisScriptFileName())) + "error.jpg"
+		)
+
+		local isPhotoSent = true
+		local photoError = ""
+		if (image != "" and doesFileExist image) do (
+			isPhotoSent = telegramMgr.sendPhoto title image
+			if (not isPhotoSent) do photoError = telegramMgr.getLastError()
+		)
+
+		local isMessageSent = telegramMgr.sendMessage txt
+		local isSent = isPhotoSent and isMessageSent
+
+		if (isSent) then (
+			print "[Telegram] Processing report sent."
+		) else (
+			local err = telegramMgr.getLastError()
+			if (photoError != "") do err = "Photo error: " + photoError + "\nMessage error: " + err
+			print ("[Telegram] Processing report failed: " + err)
+		)
+
+		return isSent
+	)
+
+	fn failCurrentProcess slug sourceName message statusCaption: "" expectedExitFiles: #() uploadedFiles: #() failedFiles: #() = (
+		local errorMessage = message
+		if (findString errorMessage "[Error]" == undefined) do errorMessage = "[Error] " + errorMessage
+
+		postProcessLog errorMessage
+		requestMgr.postStatus #error txt: message
+		if (statusCaption == "") do statusCaption = message
+		lblStatus.caption = statusCaption
+
+		markProcessedFileInSession()
+		sendProcessingTelegramReport false slug sourceName expectedExitFiles uploadedFiles failedFiles "" errorMessage: message
+		if (processedFilesInSession >= maxProcessFilesInSession) do (
+			schedule3dsMaxRestartAfterProcessedLimit()
+			return false
+		)
+
+		statusMessageNextProcess create: true
+		tmrNextProcess.active = true
+		return false
+	)
+
 	fn getGeometryLayerNames = (
 		local names = #()
 
@@ -3882,11 +4094,11 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	)
 
 	fn logLayerPolyStats layerNames = (
-		requestMgr.postLog txt: ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
+		postProcessLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
 
 		for layerName in layerNames do (
 			local stat = getGeometryLayerPolyStats layerName
-			requestMgr.postLog txt: ("Layer polygon count: " + (formatPolyStats stat))
+			postProcessLog ("Layer polygon count: " + (formatPolyStats stat))
 		)
 	)
 
@@ -3925,6 +4137,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		fn logMessage txt postLogs: true = (
 			print txt
+			addProcessTelegramLog txt
 			if (postLogs) do requestMgr.postLog txt: txt
 		)
 
@@ -4000,6 +4213,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 	/* PROCESS FILES */
 	fn processFiles = (
+		resetProcessTelegramLogs()
 		lblSlug.caption = ""
 		local credentialsMode = getCredentialsMode()
 		local credentialsModeLabel = getCredentialsModeLabel credentialsMode
@@ -4072,7 +4286,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		requestMgr.version_id = version_id
 		requestMgr.slug = slug
 
-		requestMgr.postLog txt: "Updating status to In Progress..."
+		postProcessLog "Updating status to In Progress..."
 		lblStatus.caption = "Updating status to In Progress..."
 
 		-- Set Status: in_progress
@@ -4088,12 +4302,12 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		clearFolder d
 
 		-- Download file
-		requestMgr.postLog txt: "Downloading source file..."
+		postProcessLog "Downloading source file..."
 		lblStatus.caption = "Downloading source file..."
 
 		downloadMgr.download download_url file
 
-		requestMgr.postLog txt: "Source file downloaded. Validating file..."
+		postProcessLog "Source file downloaded. Validating file..."
 		lblStatus.caption = "Validating downloaded file..."
 
 		-- Tell that we try conversion
@@ -4101,14 +4315,10 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		-- Is file not valid immediately request next file
 		if (not downloadMgr.isValidFile file) do (
-			requestMgr.postLog txt: "Downloaded file is invalid."
-			requestMgr.postStatus #error txt: ("Downloaded file is invalid: " + slug)
-			lblStatus.caption = "Downloaded file is invalid."
-			processFiles()
-			return false
+			return failCurrentProcess slug source_original_name ("Downloaded file is invalid: " + slug) statusCaption: "Downloaded file is invalid."
 		)
 
-		requestMgr.postLog txt: ("Source file downloaded: " + slug)
+		postProcessLog ("Source file downloaded: " + slug)
 		requestMgr.postStatus #downloaded txt: ("Source file downloaded: " + slug)
 
 		local blendGLBMgr = BlenderGLBWrapper()
@@ -4129,16 +4339,12 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		ao.type = #corona
 
 		lblStatus.caption = "Extracting archive and loading scene..."
-		requestMgr.postLog txt: "Extracting archive and loading scene..."
+		postProcessLog "Extracting archive and loading scene..."
 		local r = ::API_BATCH_GLB_CONVERTER.load file
 
 		if (not r.opened) do (
 			clearFolder d
-			requestMgr.postLog txt: "[Error] Cannot open scene file."
-			requestMgr.postStatus #error txt: "Cannot open scene file."
-			lblStatus.caption = "Cannot open scene file."
-			processFiles()
-			return false
+			return failCurrentProcess slug source_original_name "Cannot open scene file."
 		)
 
 		local expectedExitFiles = #()
@@ -4148,17 +4354,13 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local sourceDeleteDir = r.del
 
 		if (splitByLayers and doesFileExist sourceSceneFile) then (
-			requestMgr.postLog txt: ("Scene has " + (layerNames.count as string) + " layers with objects. Converting each layer separately.")
+			postProcessLog ("Scene has " + (layerNames.count as string) + " layers with objects. Converting each layer separately.")
 			logLayerPolyStats layerNames
 
 			local failedLayerStats = getLayersOverPolyLimit layerNames
 			if (failedLayerStats.count > 0) do (
 				local m = "Layer polygon limit exceeded. Limit per layer: " + (_MAX_ALLOWED_POLYS as string) + ". Failed layers: " + (formatPolyStatsList failedLayerStats) + "."
-				requestMgr.postLog txt: ("[Error] " + m)
-				requestMgr.postStatus #error txt: m
-				lblStatus.caption = "Layer polygon limit exceeded. Skipping file."
-				processFiles()
-				return false
+				return failCurrentProcess slug source_original_name m statusCaption: "Layer polygon limit exceeded. Skipping file."
 			)
 
 			r.del = undefined
@@ -4171,15 +4373,15 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				local skpName = slug + "-SKP" + suffix
 
 				lblStatus.caption = "Loading layer " + (i as string) + " of " + (layerNames.count as string) + "..."
-				requestMgr.postLog txt: ("Loading source scene for layer " + (i as string) + ": " + layerName)
+				postProcessLog ("Loading source scene for layer " + (i as string) + ": " + layerName)
 				loadMaxFile sourceSceneFile quiet: true
 				resetLoadedSceneState()
 
 				local objectsCount = keepOnlyGeometryFromLayer layerName
 				if (objectsCount == 0) then (
-					requestMgr.postLog txt: ("[Warning] Layer has no geometry after reload. Skipping layer: " + layerName)
+					postProcessLog ("[Warning] Layer has no geometry after reload. Skipping layer: " + layerName)
 				) else (
-					requestMgr.postLog txt: ("Converting layer " + (i as string) + " of " + (layerNames.count as string) + ": " + layerName)
+					postProcessLog ("Converting layer " + (i as string) + " of " + (layerNames.count as string) + ": " + layerName)
 					convertSceneVariant r glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles
 				)
 			)
@@ -4187,19 +4389,15 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			if (sourceDeleteDir != undefined) do ::API_BATCH_GLB_CONVERTER.rmDir sourceDeleteDir
 		) else (
 			if (splitByLayers and not doesFileExist sourceSceneFile) do (
-				requestMgr.postLog txt: "[Warning] Multiple layers were detected, but the source scene file could not be reloaded. Converting the whole scene."
+				postProcessLog "[Warning] Multiple layers were detected, but the source scene file could not be reloaded. Converting the whole scene."
 			)
 
 			local sceneStat = getGeometryPolyStats (geometry as array) label: "Whole scene"
-			requestMgr.postLog txt: ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
-			requestMgr.postLog txt: ("Scene polygon count: " + (formatPolyStats sceneStat))
+			postProcessLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
+			postProcessLog ("Scene polygon count: " + (formatPolyStats sceneStat))
 			if (sceneStat[2] > _MAX_ALLOWED_POLYS) do (
 				local m = "The polygon count exceeds the allowed limit. Limit: " + (_MAX_ALLOWED_POLYS as string) + ". Scene polygons: " + (sceneStat[2] as string) + "."
-				requestMgr.postLog txt: ("[Error] " + m)
-				requestMgr.postStatus #error txt: m
-				lblStatus.caption = "Polygon limit exceeded. Skipping file."
-				processFiles()
-				return false
+				return failCurrentProcess slug source_original_name m statusCaption: "Polygon limit exceeded. Skipping file."
 			)
 
 			convertSceneVariant r (slug + "-GLB") (slug + "-BLEND") (slug + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles
@@ -4208,17 +4406,17 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local cntExistingFiles = checkExistingFiles expectedExitFiles
 		if (cntExistingFiles != expectedExitFiles.count) then (
 			local m = "Not all files were converted. Expected: " + expectedExitFiles.count as string + ". Found: " + cntExistingFiles as string + "."
-			requestMgr.postLog txt: m
+			postProcessLog m
 		) else (
 			local m = "All files were converted. Uploading to S3..."
-			requestMgr.postLog txt: m
+			postProcessLog m
 		)
 
 		local uploadedFiles = #()
 		local failedFiles = #()
 
 		lblStatus.caption = "Uploading files to S3..."
-		requestMgr.postLog txt: "Uploading files to S3..."
+		postProcessLog "Uploading files to S3..."
 
 		for f in expectedExitFiles do (
 			local fileName = filenameFromPath f
@@ -4226,7 +4424,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			if (not doesFileExist f) then (
 				local m = "[Error] Upload skipped. File does not exist: " + fileName
 				append failedFiles fileName
-				requestMgr.postLog txt: m
+				postProcessLog m
 			) else (
 				local uploadResult = awsUploaderMgr.upload f
 				local isUploaded = (uploadResult[1] == "true")
@@ -4234,10 +4432,10 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 				if (isUploaded) then (
 					append uploadedFiles fileName
-					requestMgr.postLog txt: ("Uploaded to S3: " + fileName)
+					postProcessLog ("Uploaded to S3: " + fileName)
 				) else (
 					append failedFiles fileName
-					requestMgr.postLog txt: ("[Error] " + uploadMessage)
+					postProcessLog ("[Error] " + uploadMessage)
 				)
 			)
 		)
@@ -4247,17 +4445,28 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			local successMessage = "Uploaded successfully!"
 			lblStatus.caption = "All files were uploaded to S3."
 			requestMgr.postStatus #uploaded txt: m
-			requestMgr.postLog txt: m
-			requestMgr.postLog txt: successMessage
-			requestMgr.postStatus #success txt: successMessage
+			postProcessLog m
+			postProcessLog successMessage
+
+			local result_json = buildUploadedFilesResultJson uploadedFiles
+			postProcessLog ("Result JSON: " + result_json)
+
+			requestMgr.postStatus #success txt: successMessage result_json: result_json
+			markProcessedFileInSession()
+			sendProcessingTelegramReport true slug source_original_name expectedExitFiles uploadedFiles failedFiles result_json
 		) else (
 			local m = "No files were uploaded to S3. Failed files: " + (implodeString failedFiles)
 			lblStatus.caption = "No files were uploaded."
 			requestMgr.postStatus #error txt: m
-			requestMgr.postLog txt: m
+			postProcessLog m
+			markProcessedFileInSession()
+			sendProcessingTelegramReport false slug source_original_name expectedExitFiles uploadedFiles failedFiles "" errorMessage: m
 		)
 
-		lblSlug.caption = "--"
+		if (processedFilesInSession >= maxProcessFilesInSession) do (
+			schedule3dsMaxRestartAfterProcessedLimit()
+			return true
+		)
 
 		statusMessageNextProcess create: true
 		tmrNextProcess.active = true
@@ -4316,6 +4525,9 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		warnAboutNecessaryOptions()
 
 		if (v) then (
+			processedFilesInSession = 0
+			updateRemainingFilesLabel()
+
 			local s = "try (fileIn @\"" + (getThisScriptFilename()) + "\") catch (print \"Error! Can't GC-Autoconverter-GLB.ms!\")"
 			writeFile startupScript s
 
@@ -4329,6 +4541,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			tmrOnStartDelay.active = false
 			tmrNextProcess.active = false
 			tmrQueueRestart.active = false
+			tmrCounteRestart.active = false
 
 			statusMessageRestartMaxIn dispose: true
 			statusMessageScanningWillStart dispose: true
@@ -4373,6 +4586,11 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 	on tmrCounterMaxRestart tick do (
 		statusMessageRestartMaxIn()
+	)
+
+	on tmrCounteRestart tick do (
+		tmrCounteRestart.active = false
+		restart3dsMax()
 	)
 
 	on tmrOnStartDelay tick do (
