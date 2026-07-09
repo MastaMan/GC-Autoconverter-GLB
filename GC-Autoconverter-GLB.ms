@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.0.0
+VERSION=1.0.1
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -12,6 +12,9 @@ Auto Converter to GLB/SKP/BLEND script=
 
 [1.0.0]
 *Initial release =
+
+[1.0.1]
++ Added: Debug section =
 
 [FILES]
 Install.mcr=
@@ -4411,6 +4414,8 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 )
 
 rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
+	local debugGLBFiles = #()
+
 	group "Formats" (
 		checkbox cbxDebugBakeCoronaAO "Bake Corona AO"
 		checkbox cbxDebugConvertToBlend "Convert to BLEND"
@@ -4418,7 +4423,13 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 	)
 
 	button btnDebugConvertCurrentScene "Convert Current Scene" width: 260 height: 32
-	button btnDebugPreviewGLB "Preview GLB File" width: 260 height: 24
+
+	group "GLB Preview" (
+		label lblDebugPreviewInfo "Double-click a GLB file to open it in the browser preview." align: #left
+		listbox lbxDebugGLBFiles "" height: 5 width: 260
+		button btnDebugUpdateGLBList "Update" width: 260 height: 24
+	)
+
 	label lblDebugStatus "" align: #left offset: [0, 5]
 
 	fn debugLog txt = (
@@ -4472,28 +4483,26 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 		return ""
 	)
 
-	fn getLastDebugGLB = (
-		local f = '*'.get "debugLastGLB"
-		if (f != "" and doesFileExist f) do return f
+	fn updateDebugGLBList = (
+		debugGLBFiles = #()
+		local names = #()
+		local d = getOutputPath()
 
-		if (maxFileName != "") do (
-			local sceneName = getFilenameFile maxFileName
-			local d = getOutputPath()
-			local candidates = #(
-				d + sceneName + "-GLB.glb",
-				d + sceneName + "-GLB-1.glb"
+		if (d != "" and doesDirectoryExist d) do (
+			for f in (getFiles (d + "*.glb")) do (
+				append debugGLBFiles f
+				append names (filenameFromPath f)
 			)
-
-			for candidate in candidates where doesFileExist candidate do return candidate
 		)
 
-		return ""
+		lbxDebugGLBFiles.items = names
+		if (names.count == 0) do debugLog "No GLB files found in the debug output folder."
+		return debugGLBFiles.count
 	)
 
-	fn previewDebugGLB = (
-		local f = getLastDebugGLB()
+	fn previewDebugGLB f = (
 		if (f == "") do (
-			messageBox "Debug GLB file was not found. Run Convert Current Scene first." title: "Debug"
+			messageBox "Debug GLB file was not found. Run Convert Current Scene first, or click Update." title: "Debug"
 			return false
 		)
 
@@ -4612,6 +4621,7 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 
 		local cntExistingFiles = ::_rGCAutoGLBConverter_Main.checkExistingFiles expectedExitFiles
 		local lastGLB = rememberLastDebugGLB expectedExitFiles
+		updateDebugGLBList()
 		local m = "Debug conversion finished.\n\nOriginal scene:\n" + originalSceneFile + "\n\nConverted scene:\n" + convertedSceneFile + "\n\nConverted files found: " + (cntExistingFiles as string) + " of " + (expectedExitFiles.count as string) + "."
 		if (lastGLB != "") do m += "\n\nPreview GLB:\n" + lastGLB
 		if (convertedSceneFiles.count > 1) do m += "\n\nLayer compare scenes: " + (convertedSceneFiles.count as string)
@@ -4636,12 +4646,19 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 		convertDebugScene()
 	)
 
-	on btnDebugPreviewGLB pressed do (
-		previewDebugGLB()
+	on btnDebugUpdateGLBList pressed do (
+		updateDebugGLBList()
+	)
+
+	on lbxDebugGLBFiles doubleClicked item do (
+		if (item > 0 and item <= debugGLBFiles.count) do (
+			previewDebugGLB debugGLBFiles[item]
+		)
 	)
 
 	on _rGCAutoGLBConverter_Debug open do (
 		loadSettings()
+		updateDebugGLBList()
 	)
 )
 
