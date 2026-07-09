@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.0.3
+VERSION=1.0.4
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -21,6 +21,9 @@ Auto Converter to GLB/SKP/BLEND script=
 
 [1.0.3]
 + Added: Support Telegrams notifications =
+
+[1.0.4]
+- BugFix: SKP withou archive =
 
 [FILES]
 Install.mcr=
@@ -1774,11 +1777,11 @@ struct SketchupConverterWrapper (
 
 		this.clearCache()
 	),
-	/*fn makeArchive = (
+	fn makeArchive = (
 		archivate this.zip this.tmpOut
 		this.j.addData json "name" (filenameFromPath this.zip)
 		this.j.addData json "sizeMb" (getFileMb this.zip)
-	),*/
+	),
 	fn makeJson = (
 		this.j.writeJson this.jsonFile this.json
 	),
@@ -1788,15 +1791,16 @@ struct SketchupConverterWrapper (
 
 		local p = getFilenamePath glb
 		local pp = p + name + @"\"
+		makeDir pp all: true
 
 		this.input = input
 		this.glb = glb
 
 		this.preview = p + name + ".png"
 		this.zip = p + name + ".zip"
-		this.outFile = p + name + ".skp"
+		this.outFile = pp + name + ".skp"
 		this.jsonFile = p + name + ".json"
-		this.tmpOut = p
+		this.tmpOut = pp
 	)
 )
 
@@ -3984,6 +3988,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				)
 
 				skpMgr.convertMax2Skp()
+				skpMgr.makeArchive()
 				skpMgr.makeJson()
 			) else (
 				logMessage "[Error] SketchUp conversion is enabled, but SketchUp was not found." postLogs: postLogs
@@ -4236,7 +4241,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				)
 			)
 		)
-
+		
 		if (uploadedFiles.count == expectedExitFiles.count) then (
 			local m = "All files were uploaded to S3 successfully: " + (implodeString uploadedFiles)
 			local successMessage = "Uploaded successfully!"
@@ -4245,13 +4250,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			requestMgr.postLog txt: m
 			requestMgr.postLog txt: successMessage
 			requestMgr.postStatus #success txt: successMessage
-		) else if (uploadedFiles.count > 0) then (
-			local m = "Not all files were uploaded to S3. Failed files: " + (implodeString failedFiles)
-			local successMessage = "Uploaded successfully, but conveted not all files!"
-			lblStatus.caption = "Some files were not uploaded."
-			requestMgr.postStatus #uploaded txt: m
-			requestMgr.postStatus #success txt: successMessage
-			requestMgr.postLog txt: m
 		) else (
 			local m = "No files were uploaded to S3. Failed files: " + (implodeString failedFiles)
 			lblStatus.caption = "No files were uploaded."
