@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.0.1
+VERSION=1.0.2
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -15,6 +15,9 @@ Auto Converter to GLB/SKP/BLEND script=
 
 [1.0.1]
 + Added: Debug section =
+
+[1.0.2]
++ Added: Test connections in Credentials =
 
 [FILES]
 Install.mcr=
@@ -57,6 +60,7 @@ web-request.bat=deleted
 sketchup-convert.bat=
 template.skp=
 listener-error-observer.ms=
+test-s3-uploader.ms=
 
 
 [SCRIPT]
@@ -4251,6 +4255,8 @@ rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 
 		label lblWebApiSecretKey "Secret Key:" align: #left across: 2
 		edittext edtWebApiSecretKey "" align: #right width: 180
+
+		button btnTestWebApi "Test" width: 80 align: #right
 	)
 
 	group "AWS S3" (
@@ -4265,6 +4271,8 @@ rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 
 		label lblAwsSecretKey "Secret Key:" align: #left across: 2
 		edittext edtAwsSecretKey "" align: #right width: 180
+
+		button btnTestAws "Test" width: 80 align: #right
 	)
 
 	fn trim s = (
@@ -4319,6 +4327,57 @@ rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 		isLoadingCredentials = false
 	)
 
+	fn testWebApiCredentials = (
+		saveSettings mode: activeCredentialMode
+		applyCredentialProfile activeCredentialMode
+
+		local modeLabel = getCredentialsModeLabel activeCredentialMode
+
+		if (requestMgr.checkCredentialsError()) do (
+			messageBox (modeLabel + " Web API credentials are missing or invalid.") title: "Web API Test"
+			return false
+		)
+
+		local response = requestMgr.getQueue()
+		if (response == undefined or response == "") do (
+			messageBox (modeLabel + " Web API test failed. Empty response.") title: "Web API Test"
+			return false
+		)
+
+		local jr = JsonReaderWrapper()
+		jr.read response
+		local isSuccess = jr.getBool "success"
+
+		if (isSuccess) then (
+			messageBox (modeLabel + " Web API test passed.") title: "Web API Test"
+			return true
+		) else (
+			messageBox (modeLabel + " Web API test failed. Response does not contain success:true.") title: "Web API Test"
+			return false
+		)
+	)
+
+	fn testAwsCredentials = (
+		saveSettings mode: activeCredentialMode
+		applyCredentialProfile activeCredentialMode
+
+		local modeLabel = getCredentialsModeLabel activeCredentialMode
+
+		if (awsUploaderMgr.checkCredentialsError()) do (
+			messageBox (modeLabel + " AWS S3 credentials are missing or invalid.") title: "AWS S3 Test"
+			return false
+		)
+
+		local testScript = (getFileNamePath (getThisScriptFileName())) + "test-s3-uploader.ms"
+		if (not doesFileExist testScript) do (
+			messageBox "Cannot find test-s3-uploader.ms. Please reinstall or update the script files." title: "AWS S3 Test"
+			return false
+		)
+
+		fileIn testScript
+		return true
+	)
+
 	on tabControl SelectedIndexChanged args do (
 		if (not isLoadingCredentials) do (
 			saveSettings mode: activeCredentialMode
@@ -4367,6 +4426,14 @@ rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 			'*'.add (getCredentialsKey activeCredentialMode "AwsSecretKey") (trim v)
 			if (activeCredentialMode == (getCredentialsMode())) do applyCredentialProfile activeCredentialMode
 		)
+	)
+
+	on btnTestWebApi pressed do (
+		testWebApiCredentials()
+	)
+
+	on btnTestAws pressed do (
+		testAwsCredentials()
 	)
 
 	on _rGCAutoGLBConverter_Credentails open do (
