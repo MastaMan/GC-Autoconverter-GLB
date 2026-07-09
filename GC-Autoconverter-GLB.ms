@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.0.5
+VERSION=1.0.6
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -32,6 +32,9 @@ Auto Converter to GLB/SKP/BLEND script=
 + Added: Remaining files before restart indicator=
 + Added: error.jpg fallback image for Telegram error reports=
 + Improved: JSON string escaping for API payloads=
+
+[1.0.6]
+- BugFix: Small fixes=
 
 [FILES]
 Install.mcr=
@@ -3789,12 +3792,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		lblSlug.caption = "Files before restart: " + ((getRemainingFilesInSession()) as string) + " of " + (maxProcessFilesInSession as string)
 	)
 
-	fn markProcessedFileInSession = (
-		processedFilesInSession += 1
-		updateRemainingFilesLabel()
-		postProcessLog ("Processed files in this 3ds Max session: " + (processedFilesInSession as string) + " of " + (maxProcessFilesInSession as string) + ". Remaining before restart: " + ((getRemainingFilesInSession()) as string))
-	)
-
 	fn shortenText txt maxLen: 1200 = (
 		if (txt == undefined) do return ""
 		txt = txt as string
@@ -3952,6 +3949,12 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	fn postProcessLog txt = (
 		addProcessTelegramLog txt
 		requestMgr.postLog txt: txt
+	)
+
+	fn markProcessedFileInSession = (
+		processedFilesInSession += 1
+		updateRemainingFilesLabel()
+		postProcessLog ("Processed files in this 3ds Max session: " + (processedFilesInSession as string) + " of " + (maxProcessFilesInSession as string) + ". Remaining before restart: " + ((getRemainingFilesInSession()) as string))
 	)
 
 	fn implodeLines lines maxChars: 3500 = (
