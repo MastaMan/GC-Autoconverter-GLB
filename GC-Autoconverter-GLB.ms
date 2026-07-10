@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.0.6
+VERSION=1.0.7
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -35,6 +35,12 @@ Auto Converter to GLB/SKP/BLEND script=
 
 [1.0.6]
 - BugFix: Small fixes=
+
+[1.0.7]
++ Added: External watchdog heartbeat with visible restart countdown=
++ Added: Configurable watchdog timeout in Settings=
++ Improved: Converted output file names now include autoconversion id and slug=
++ Improved: Watchdog uses UTC Unix timestamps consistently between MaxScript and BAT=
 
 [FILES]
 Install.mcr=
@@ -76,6 +82,7 @@ contrast.bat=
 s3-uploader.bat=
 telegram-uploader.bat=
 test-telegram-uploader.bat=
+watchdog.bat=
 curl.exe=
 web-request.bat=deleted
 sketchup-convert.bat=
@@ -1119,6 +1126,62 @@ struct settingsWrapper (
 )
 
 global '*' = settingsWrapper()
+
+struct watchdogWrapper (
+	currentPath = getFileNamePath (getThisScriptFileName()),
+	ini = currentPath + "watchdog.ini",
+	sec = "WATCHDOG",
+	settingsIni = currentPath + "global@settings.ini",
+	settingsSec = getFilenameFile (getThisScriptFileName()),
+	defaultTimeoutMin = 15,
+
+	fn getTimeoutMin = (
+		local timeoutMin = try ((getIniSetting settingsIni settingsSec "spnWatchdogTimeoutMin") as integer) catch (0)
+		if (timeoutMin < 1) do timeoutMin = defaultTimeoutMin
+		return timeoutMin
+	),
+
+	fn getTimeoutSec = (
+		return (this.getTimeoutMin()) * 60
+	),
+
+	fn saveTimeout = (
+		setIniSetting this.settingsIni this.settingsSec "spnWatchdogTimeoutMin" ((this.getTimeoutMin()) as string)
+	),
+
+	fn nowSec = (
+		-- Keep this in UTC Unix seconds; watchdog.bat uses the same .NET time basis.
+		local now = (dotNetClass "System.DateTimeOffset").UtcNow
+		return trimRight ((now.ToUnixTimeSeconds()) as string) "L"
+	),
+
+	fn start slug a_id stage: "in_progress" = (
+		local startedAt = this.nowSec()
+		setIniSetting this.ini this.sec "slug" (slug as string)
+		setIniSetting this.ini this.sec "a_id" (a_id as string)
+		setIniSetting this.ini this.sec "stage" (stage as string)
+		setIniSetting this.ini this.sec "startedAt" startedAt
+		setIniSetting this.ini this.sec "heartbeatAt" startedAt
+	),
+
+	fn beat stage: "" = (
+		local activeSlug = getIniSetting this.ini this.sec "slug"
+		if (activeSlug == undefined or activeSlug == "") do return false
+		if (stage != "") do setIniSetting this.ini this.sec "stage" (stage as string)
+		setIniSetting this.ini this.sec "heartbeatAt" (this.nowSec())
+		return true
+	),
+
+	fn clear = (
+		setIniSetting this.ini this.sec "slug" ""
+		setIniSetting this.ini this.sec "a_id" ""
+		setIniSetting this.ini this.sec "stage" ""
+		setIniSetting this.ini this.sec "startedAt" ""
+		setIniSetting this.ini this.sec "heartbeatAt" ""
+	)
+)
+
+global watchdogMgr = watchdogWrapper()
 
 fn getCredentialsMode = (
 	local m = '*'.get "mode"
@@ -3597,6 +3660,8 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		local p2 = '*'.get "cbxRunListenerErrorObserver"
 		cbxRunListenerErrorObserver.checked = p2 != "false"
+
+		watchdogMgr.saveTimeout()
 	)
 
 	fn setMode mode: #prod = (
@@ -4043,12 +4108,14 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		if (findString errorMessage "[Error]" == undefined) do errorMessage = "[Error] " + errorMessage
 
 		postProcessLog errorMessage
+		watchdogMgr.beat stage: "posting_error"
 		requestMgr.postStatus #error txt: message
 		if (statusCaption == "") do statusCaption = message
 		lblStatus.caption = statusCaption
 
 		markProcessedFileInSession()
 		sendProcessingTelegramReport false slug sourceName expectedExitFiles uploadedFiles failedFiles "" errorMessage: message
+		watchdogMgr.clear()
 		if (processedFilesInSession >= maxProcessFilesInSession) do (
 			schedule3dsMaxRestartAfterProcessedLimit()
 			return false
@@ -4145,6 +4212,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		)
 
 		lblStatus.caption = "Preparing scene: BoxTrick, Attach All, Set Pivot..."
+		watchdogMgr.beat stage: "preparing_scene"
 		logMessage ("Preparing scene for conversion: " + glbName) postLogs: postLogs
 
 		explodeAllGroups()
@@ -4164,6 +4232,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		)
 
 		lblStatus.caption = "Converting to GLB..."
+		watchdogMgr.beat stage: "converting_glb"
 		logMessage ("Converting to GLB: " + glbName) postLogs: postLogs
 		local glb = ::API_BATCH_GLB_CONVERTER.run scn: scn out: d ao: ao isNormalizeTiling: false
 
@@ -4171,6 +4240,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		if (convertToBlend) do (
 			if (blendGLBMgr.isBlenderExist()) then (
 				lblStatus.caption = "Converting to Blender..."
+				watchdogMgr.beat stage: "converting_blend"
 				logMessage ("Converting to Blender: " + blendName) postLogs: postLogs
 
 				blendGLBMgr.init glb: glb name: blendName
@@ -4194,6 +4264,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		if (convertToSketchup) do (
 			if (skpMgr.isSketchupExist()) then (
 				lblStatus.caption = "Converting to SketchUp..."
+				watchdogMgr.beat stage: "converting_skp"
 				logMessage ("Converting to SketchUp: " + skpName) postLogs: postLogs
 
 				skpMgr.init name: skpName glb: glb
@@ -4217,6 +4288,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	/* PROCESS FILES */
 	fn processFiles = (
 		resetProcessTelegramLogs()
+		watchdogMgr.clear()
 		lblSlug.caption = ""
 		local credentialsMode = getCredentialsMode()
 		local credentialsModeLabel = getCredentialsModeLabel credentialsMode
@@ -4284,6 +4356,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local status_id = jr.getString "status_id"
 		local source_original_name = jr.getString "source_original_name"
 		local count_total = jr.getInt "count_total"
+		local outputBaseName = a_id + "-" + slug
 		requestMgr.a_id = a_id
 		requestMgr.model_id = model_id
 		requestMgr.version_id = version_id
@@ -4294,7 +4367,8 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		-- Set Status: in_progress
 		requestMgr.postStatus #in_progress txt: ("Processing file: " + slug)
-		lblSlug.caption = slug
+		lblSlug.caption = a_id + "-" + slug
+		watchdogMgr.start slug a_id stage: "in_progress"
 
 		local downloadMgr = DownloadWrapper()
 		local guid = genGUID()
@@ -4302,18 +4376,22 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local file = d + fname
 		-- Clear all files in folder
 		lblStatus.caption = "Clearing working folder..."
+		watchdogMgr.beat stage: "clearing_working_folder"
 		clearFolder d
 
 		-- Download file
 		postProcessLog "Downloading source file..."
 		lblStatus.caption = "Downloading source file..."
+		watchdogMgr.beat stage: "downloading_source"
 
 		downloadMgr.download download_url file
 
 		postProcessLog "Source file downloaded. Validating file..."
 		lblStatus.caption = "Validating downloaded file..."
+		watchdogMgr.beat stage: "validating_download"
 
 		-- Tell that we try conversion
+		watchdogMgr.beat stage: "post_attempt"
 		requestMgr.postAttempt()
 
 		-- Is file not valid immediately request next file
@@ -4343,6 +4421,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		lblStatus.caption = "Extracting archive and loading scene..."
 		postProcessLog "Extracting archive and loading scene..."
+		watchdogMgr.beat stage: "loading_scene"
 		local r = ::API_BATCH_GLB_CONVERTER.load file
 
 		if (not r.opened) do (
@@ -4357,9 +4436,11 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local sourceDeleteDir = r.del
 
 		if (splitByLayers and doesFileExist sourceSceneFile) then (
+			watchdogMgr.beat stage: "checking_layers"
 			postProcessLog ("Scene has " + (layerNames.count as string) + " layers with objects. Converting each layer separately.")
 			logLayerPolyStats layerNames
 
+			watchdogMgr.beat stage: "checking_polygons"
 			local failedLayerStats = getLayersOverPolyLimit layerNames
 			if (failedLayerStats.count > 0) do (
 				local m = "Layer polygon limit exceeded. Limit per layer: " + (_MAX_ALLOWED_POLYS as string) + ". Failed layers: " + (formatPolyStatsList failedLayerStats) + "."
@@ -4371,12 +4452,13 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			for i in 1 to layerNames.count do (
 				local layerName = layerNames[i]
 				local suffix = "-" + (i as string)
-				local glbName = slug + "-GLB" + suffix
-				local blendName = slug + "-BLEND" + suffix
-				local skpName = slug + "-SKP" + suffix
+				local glbName = outputBaseName + "-GLB" + suffix
+				local blendName = outputBaseName + "-BLEND" + suffix
+				local skpName = outputBaseName + "-SKP" + suffix
 
 				lblStatus.caption = "Loading layer " + (i as string) + " of " + (layerNames.count as string) + "..."
 				postProcessLog ("Loading source scene for layer " + (i as string) + ": " + layerName)
+				watchdogMgr.beat stage: ("loading_layer_" + (i as string))
 				loadMaxFile sourceSceneFile quiet: true
 				resetLoadedSceneState()
 
@@ -4385,6 +4467,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 					postProcessLog ("[Warning] Layer has no geometry after reload. Skipping layer: " + layerName)
 				) else (
 					postProcessLog ("Converting layer " + (i as string) + " of " + (layerNames.count as string) + ": " + layerName)
+					watchdogMgr.beat stage: ("converting_layer_" + (i as string))
 					convertSceneVariant r glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles
 				)
 			)
@@ -4395,6 +4478,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				postProcessLog "[Warning] Multiple layers were detected, but the source scene file could not be reloaded. Converting the whole scene."
 			)
 
+			watchdogMgr.beat stage: "checking_polygons"
 			local sceneStat = getGeometryPolyStats (geometry as array) label: "Whole scene"
 			postProcessLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
 			postProcessLog ("Scene polygon count: " + (formatPolyStats sceneStat))
@@ -4403,9 +4487,10 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				return failCurrentProcess slug source_original_name m statusCaption: "Polygon limit exceeded. Skipping file."
 			)
 
-			convertSceneVariant r (slug + "-GLB") (slug + "-BLEND") (slug + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles
+			convertSceneVariant r (outputBaseName + "-GLB") (outputBaseName + "-BLEND") (outputBaseName + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles
 		)
 
+		watchdogMgr.beat stage: "collecting_outputs"
 		local cntExistingFiles = checkExistingFiles expectedExitFiles
 		if (cntExistingFiles != expectedExitFiles.count) then (
 			local m = "Not all files were converted. Expected: " + expectedExitFiles.count as string + ". Found: " + cntExistingFiles as string + "."
@@ -4420,9 +4505,13 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		lblStatus.caption = "Uploading files to S3..."
 		postProcessLog "Uploading files to S3..."
+		watchdogMgr.beat stage: "uploading_files"
 
+		local uploadIndex = 0
 		for f in expectedExitFiles do (
+			uploadIndex += 1
 			local fileName = filenameFromPath f
+			watchdogMgr.beat stage: ("uploading_file_" + (uploadIndex as string))
 
 			if (not doesFileExist f) then (
 				local m = "[Error] Upload skipped. File does not exist: " + fileName
@@ -4454,16 +4543,20 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			local result_json = buildUploadedFilesResultJson uploadedFiles
 			postProcessLog ("Result JSON: " + result_json)
 
+			watchdogMgr.beat stage: "posting_result"
 			requestMgr.postStatus #success txt: successMessage result_json: result_json
 			markProcessedFileInSession()
 			sendProcessingTelegramReport true slug source_original_name expectedExitFiles uploadedFiles failedFiles result_json
+			watchdogMgr.clear()
 		) else (
 			local m = "No files were uploaded to S3. Failed files: " + (implodeString failedFiles)
 			lblStatus.caption = "No files were uploaded."
+			watchdogMgr.beat stage: "posting_error"
 			requestMgr.postStatus #error txt: m
 			postProcessLog m
 			markProcessedFileInSession()
 			sendProcessingTelegramReport false slug source_original_name expectedExitFiles uploadedFiles failedFiles "" errorMessage: m
+			watchdogMgr.clear()
 		)
 
 		if (processedFilesInSession >= maxProcessFilesInSession) do (
@@ -4893,6 +4986,10 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 		checkbox cbxAODenoise "Use VRay Denoiser" offset: [15, 0]
 	)
 
+	group "Watchdog Settings" (
+		spinner spnWatchdogTimeoutMin "Stuck timeout (min):" range: [1, 999, 15] type: #integer fieldwidth: 50 align: #right
+	)
+
 	fn loadSettings = (
 		local p = '*'.get "spnAOPasses" type: #int
 		spnAOPasses.value = if (p != 0) then p else 100
@@ -4904,6 +5001,9 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 		spnAOResolution.value = if (r != 0) then r else 1024
 
 		cbxAODenoise.checked = '*'.get "cbxAODenoise" type: #bool_false
+
+		spnWatchdogTimeoutMin.value = watchdogMgr.getTimeoutMin()
+		watchdogMgr.saveTimeout()
 	)
 
 	on spnDownloadQueueQuantity changed v do '*'.add  "spnDownloadQueueQuantity" v
@@ -4911,6 +5011,10 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 	on spnAOSize changed v do '*'.add  "spnAOSize" v
 	on spnAOResolution changed v do '*'.add  "spnAOResolution" v
 	on cbxAODenoise changed v do '*'.add  "cbxAODenoise" v
+	on spnWatchdogTimeoutMin changed v do (
+		setIniSetting watchdogMgr.settingsIni watchdogMgr.settingsSec "spnWatchdogTimeoutMin" (v as string)
+		watchdogMgr.saveTimeout()
+	)
 
 	on _rGCAutoGLBConverter_Settings open do (
 		loadSettings()

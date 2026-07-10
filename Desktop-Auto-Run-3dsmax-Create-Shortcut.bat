@@ -13,11 +13,12 @@ if exist "%MAX_SENDDMP%" (
     echo senddmp.exe disabled!
 ) 
 
+taskkill /F /FI "IMAGENAME eq cmd.exe" /FI "WINDOWTITLE eq 3ds Max Watchdog" >nul 2>nul
+start "3ds Max Watchdog" "%~dp0watchdog.bat"
+
 :restart
 
 tasklist /fi "imagename eq 3dsmax.exe" | find /i "3dsmax.exe" >nul && (
-  for /f %%A in ('powershell -NoP -C "(Get-Date).ToString(\"yyyy-MM-dd HH:mm:ss\")"') do set "NOW=%%A"
-  echo [!NOW!] 3ds Max already run, waiting 10sec...
   timeout /t 10 /nobreak >nul
   goto restart
 )
@@ -25,9 +26,6 @@ tasklist /fi "imagename eq 3dsmax.exe" | find /i "3dsmax.exe" >nul && (
 for /f %%A in ('powershell -NoP -C "(Get-Date).ToString(\"yyyy-MM-dd HH:mm:ss\")"') do set "NOW=%%A"
 echo [!NOW!] Start 3ds Max...
 
-start "" /wait "%MAX_EXE%" %MAX_ARGS%
-
-for /f %%A in ('powershell -NoP -C "(Get-Date).ToString(\"yyyy-MM-dd HH:mm:ss\")"') do set "NOW=%%A"
-echo [!NOW!] 3ds Max exited. Restart in 5sec...
+start "" "%MAX_EXE%" %MAX_ARGS%
 timeout /t 5 /nobreak >nul
 goto restart
