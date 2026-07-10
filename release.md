@@ -1,0 +1,76 @@
+# Release Process
+
+This project currently releases by updating the script version, committing to
+`main`, and pushing to `origin/main`. Git tags are not used in the existing
+history.
+
+## Steps
+
+1. Check the current state:
+
+```powershell
+git -c safe.directory=[...CURDIR...]/GC-Autoconverter-GLB status --short --branch
+git -c safe.directory=[...CURDIR...]/GC-Autoconverter-GLB log --oneline --decorate -5
+```
+
+2. Update `GC-Autoconverter-GLB.ms`:
+
+- Change `[INFO] VERSION` to the new version.
+- Add a changelog block near the top, for example:
+
+```ini
+[1.0.7]
++ Added: ...
+* Improved: ...
+- BugFix: ...
+* Changed: ...
+- Deleted: ...
+```
+
+3. If new runtime/support files were added, make sure they are listed in the
+`[FILES]` section of `GC-Autoconverter-GLB.ms`.
+
+4. Run release checks:
+
+```powershell
+git -c safe.directory=[...CURDIR...]/GC-Autoconverter-GLB diff --check
+rg -n -- "AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|aws_secret_access_key|aws_access_key_id|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|secretAccessKey|accessKeyId" GC-Autoconverter-GLB.ms *.bat
+```
+
+`rg` should return no matches for credential patterns.
+
+5. Commit the release:
+
+```powershell
+git -c safe.directory=[...CURDIR...]/GC-Autoconverter-GLB add GC-Autoconverter-GLB.ms <other changed files>
+git -c safe.directory=[...CURDIR...]/GC-Autoconverter-GLB commit -m "1.0.7"
+```
+
+Use the version number as the commit message, matching the existing history.
+
+6. Push to GitHub:
+
+```powershell
+git -c safe.directory=[...CURDIR...]/GC-Autoconverter-GLB push origin main
+```
+
+7. Confirm the release:
+
+```powershell
+git -c safe.directory=[...CURDIR...]/GC-Autoconverter-GLB status --short --branch
+git -c safe.directory=[...CURDIR...]/GC-Autoconverter-GLB log --oneline --decorate -3
+```
+
+Expected result:
+
+- `main` is synchronized with `origin/main`.
+- The latest commit message is the release version.
+- The working tree is clean.
+
+## Notes
+
+- Do not add runtime files such as `watchdog.ini` to git or `[FILES]`.
+- Keep local settings files with credentials out of credential scans and out of
+  commits.
+- If `git push` prints a `credential-manager-core` warning but still updates
+  `origin/main`, treat the push as successful and verify with `git status`.
