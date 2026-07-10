@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.0.8
+VERSION=1.0.9
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -47,6 +47,11 @@ Auto Converter to GLB/SKP/BLEND script=
 + Improved: Web API Test button opens the manual request tester=
 + Improved: JSON builder supports bool, integer, integer64 and float values=
 + Improved: Request tester log uses a multiline .NET text box with readable JSON=
+
+[1.0.9]
++ Improved: Watchdog heartbeat now reports more detailed GLB conversion stages=
++ Improved: Watchdog heartbeat calls are protected with try/catch=
++ Improved: Watchdog rereads INI state every 10 seconds=
 
 [FILES]
 Install.mcr=
@@ -2929,6 +2934,7 @@ struct BatchGLBConverterWrapper (
 	),
 
 	fn convertToCorona = (
+		try (watchdogMgr.beat stage: "convert_to_corona") catch()
 		::CoronaConverterSuppressGui = true
 		::CoronaConverter
 		local ff = getFiles (@"c:\Program Files\Corona\Corona Renderer for 3ds Max\" + getCurrentMaxVersion() + @"\Scripts\coronaConverter*.ms")
@@ -2944,6 +2950,7 @@ struct BatchGLBConverterWrapper (
 	),
 
 	fn autoUnwrap obj = (
+		try (watchdogMgr.beat stage: ("auto_unwrap:" + obj.name)) catch()
 		with redraw off with undo off (
 			select obj
 			max hierarchy mode
@@ -2970,6 +2977,7 @@ struct BatchGLBConverterWrapper (
 	),
 
 	fn attachObjectsByMaterials = (
+		try (watchdogMgr.beat stage: "attach_objects_by_materials") catch()
 		local mats = #()
 		for i in objects where this.isValidObject i do appendIfUnique mats i.material
 
@@ -2999,6 +3007,7 @@ struct BatchGLBConverterWrapper (
 	),
 
 	fn denoiseImage f = (
+		try (watchdogMgr.beat stage: ("denoise_ao:" + (filenameFromPath f))) catch()
 		local v = getCurrentMaxVersion()
 
 		local args = v + ";" + f
@@ -3016,6 +3025,7 @@ struct BatchGLBConverterWrapper (
 
 	fn bakeCoronaAO obj filename ao: undefined = (
 		if (ao == undefined) do return false
+		try (watchdogMgr.beat stage: ("bake_corona_ao_prepare:" + obj.name)) catch()
 
 		try (convertToMesh obj) catch ()
 		max tool zoomextents
@@ -3024,6 +3034,7 @@ struct BatchGLBConverterWrapper (
 		select obj
 
 		local originalMaterial = obj.material
+		try (watchdogMgr.beat stage: ("bake_corona_ao_setup:" + obj.name)) catch()
 
 		local p = getFilenamePath filename
 		local n = getFilenameFile filename
@@ -3068,8 +3079,10 @@ struct BatchGLBConverterWrapper (
 		obj.INodeBakeProperties.nDilations = 2
 		select obj
 
+		try (watchdogMgr.beat stage: ("bake_corona_ao_render:" + obj.name)) catch()
 		render rendertype:#bakeSelected vfb: true progressBar:true outputSize:[ao.resolution, ao.resolution] vfb: false
 
+		try (watchdogMgr.beat stage: ("bake_corona_ao_optimize:" + obj.name)) catch()
 		this.optimizeImages files: #(filename)
 
 		if (ao.denoise) do denoiseImage filename
@@ -3110,6 +3123,7 @@ struct BatchGLBConverterWrapper (
 
 	fn bakeXNormalAO obj filename ao: undefined = (
 		if (ao == undefined) do return false
+		try (watchdogMgr.beat stage: ("bake_xnormal_ao_prepare:" + obj.name)) catch()
 
 		local denoise = ao.denoise
 		local res = ao.resolution as string
@@ -3122,6 +3136,7 @@ struct BatchGLBConverterWrapper (
 		makeDir p all: true
 
 		local clone = snapshot obj
+		try (watchdogMgr.beat stage: ("bake_xnormal_ao_export:" + obj.name)) catch()
 
 		channelInfo.CopyChannel clone 3 2
 		channelInfo.PasteChannel clone 3 1
@@ -3141,6 +3156,7 @@ struct BatchGLBConverterWrapper (
 		local generatedFile = p + n + "_cavity" + ext
 		deleteFile generatedFile
 
+		try (watchdogMgr.beat stage: ("bake_xnormal_ao_run:" + obj.name)) catch()
 		this.xNomralCmd f filename res
 
 		renameFile generatedFile filename
@@ -3148,12 +3164,14 @@ struct BatchGLBConverterWrapper (
 		delete clone
 		deleteFile f
 
+		try (watchdogMgr.beat stage: ("bake_xnormal_ao_optimize:" + obj.name)) catch()
 		this.optimizeImages files: #(filename)
 		if (ao.denoise) do denoiseImage filename
 	),
 
 	fn setAOmap obj f = (
 		if (f == "" or not doesFileExist f) do return false
+		try (watchdogMgr.beat stage: ("set_ao_map:" + obj.name)) catch()
 
 		local d = getDenoisedImage f
 		if (d != undefined) do f = d
@@ -3169,9 +3187,13 @@ struct BatchGLBConverterWrapper (
 	),
 
 	fn createAOmap ao: undefined = (
+		try (watchdogMgr.beat stage: "create_ao_map") catch()
 		max unhide all
 		local oo = geometry as array
+		local aoIndex = 0
 		for o in oo where this.isValidObject o do (
+			aoIndex += 1
+			try (watchdogMgr.beat stage: ("create_ao_map_object_" + (aoIndex as string) + ":" + o.name)) catch()
 			local n = o.material.name
 			o.material = copy o.material
 			o.material.name = n
@@ -3328,57 +3350,88 @@ struct BatchGLBConverterWrapper (
 		this.normalsQueue = #()
 
 		-- Normalize Mesh
+		try (watchdogMgr.beat stage: "glb_normalize_ungroup") catch()
 		this.ungroupRecursive()
+		try (watchdogMgr.beat stage: "glb_normalize_remove_extra_objects") catch()
 		this.removeExtraObjects()
+		try (watchdogMgr.beat stage: "glb_normalize_mesh_smooth") catch()
 		this.neutralizeMeshSmooth()
+		try (watchdogMgr.beat stage: "glb_fix_geometry") catch()
 		this.fixGeometry()
 		this.attachObjectsByMaterials()
 
 		-- Save Fog color before conversion to Corona
+		try (watchdogMgr.beat stage: "save_fog_color_to_diffuse") catch()
 		this.setVrayMtlFogColorToDiffuse()
 
 		-- Purge cache
+		try (watchdogMgr.beat stage: "clear_cache_maps") catch()
 		this.clearCacheMapsDir()
 
 		-- @@ Convert all to Corona Physical Mtl
 		this.convertToCorona()
 
 		-- Bitmap instansing
+		try (watchdogMgr.beat stage: "instance_duplicate_maps") catch()
 		this.instnceDuplicateMaps()
 
+		try (watchdogMgr.beat stage: "collect_falloff_materials") catch()
 		local falloffMaterials = this.getMaterialsWithFalloff()
 
 		-- Simplify maps
+		try (watchdogMgr.beat stage: "simplify_gamma_corona_normal") catch()
 		this.enableGammaCoronaNormal()
+		try (watchdogMgr.beat stage: "simplify_falloff") catch()
 		this.neutralizeFalloff()
+		try (watchdogMgr.beat stage: "simplify_corona_ao") catch()
 		this.neutralizeCoronaAO()
+		try (watchdogMgr.beat stage: "simplify_ray_switch") catch()
 		this.neutralizeRaySwitch()
+		try (watchdogMgr.beat stage: "simplify_corona_skin") catch()
 		this.neutralizeCoronaSkinMtl()
+		try (watchdogMgr.beat stage: "simplify_corona_layered") catch()
 		this.neutralizeCoronaLayered()
+		try (watchdogMgr.beat stage: "simplify_noise") catch()
 		this.neutralizeNoise()
+		try (watchdogMgr.beat stage: "simplify_blend_material") catch()
 		this.neutralizeBlendMtl()
+		try (watchdogMgr.beat stage: "simplify_double_sided") catch()
 		this.neutralizeDoubleSided()
+		try (watchdogMgr.beat stage: "simplify_corona_mix") catch()
 		this.neutralizeCoronaMix()
 
 		-- Convert to GLTF Material
+		try (watchdogMgr.beat stage: "convert_corona_physical_to_gltf") catch()
 		this.coronaPhysicalMtlToGltfMaterial falloffMaterials: falloffMaterials
+		try (watchdogMgr.beat stage: "convert_corona_light_to_gltf") catch()
 		this.coronaLightMtlToGltfMaterial()
 
 		-- Tiling to proper mapping	(Kill Tiling)
-		if (isNormalizeTiling) do normalizeRealWorldUVWbyTiling()
+		if (isNormalizeTiling) do (
+			try (watchdogMgr.beat stage: "normalize_real_world_uvw") catch()
+			normalizeRealWorldUVWbyTiling()
+		)
 
 		-- Empty maps to Black!
+		try (watchdogMgr.beat stage: "replace_empty_maps_to_black") catch()
 		replaceToBlackEmptyBitmap()
 
 		-- Render Maps
+		try (watchdogMgr.beat stage: "render_textures_queue") catch()
 		this.renderTexturesQueue()
+		try (watchdogMgr.beat stage: "render_normals_queue") catch()
 		this.renderNormalsQueue()
 
-		if (ao.enabled) do this.createAOmap ao: ao
+		if (ao.enabled) do (
+			try (watchdogMgr.beat stage: "create_ao_maps") catch()
+			this.createAOmap ao: ao
+		)
 
+		try (watchdogMgr.beat stage: "export_glb") catch()
 		local o = this.exportGLB out n: scn.name
 
 		-- JSON: Data
+		try (watchdogMgr.beat stage: "collect_glb_metadata") catch()
 		local glbPolys = polyCount objects
 		local glbSize = getFileMb o
 
@@ -3394,12 +3447,17 @@ struct BatchGLBConverterWrapper (
 		this.j.addData this.json "materialsCount" (getMaterialsCnt())
 
 		-- Write JSON
+		try (watchdogMgr.beat stage: "write_glb_json") catch()
 		local jsonFile = out + scn.name + ".json"
 		this.j.writeJson jsonFile this.json
 
+		try (watchdogMgr.beat stage: "save_glb_scene") catch()
 		this.saveGLBScene()
 
-		if (scn.del != undefined) do rmDir scn.del
+		if (scn.del != undefined) do (
+			try (watchdogMgr.beat stage: "cleanup_source_temp") catch()
+			rmDir scn.del
+		)
 
 		SetQuietMode false
 
@@ -4141,7 +4199,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		if (findString errorMessage "[Error]" == undefined) do errorMessage = "[Error] " + errorMessage
 
 		postProcessLog errorMessage
-		watchdogMgr.beat stage: "posting_error"
+		try (watchdogMgr.beat stage: "posting_error") catch()
 		requestMgr.postStatus #error txt: message
 		if (statusCaption == "") do statusCaption = message
 		lblStatus.caption = statusCaption
@@ -4245,7 +4303,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		)
 
 		lblStatus.caption = "Preparing scene: BoxTrick, Attach All, Set Pivot..."
-		watchdogMgr.beat stage: "preparing_scene"
+		try (watchdogMgr.beat stage: "preparing_scene") catch()
 		logMessage ("Preparing scene for conversion: " + glbName) postLogs: postLogs
 
 		explodeAllGroups()
@@ -4265,7 +4323,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		)
 
 		lblStatus.caption = "Converting to GLB..."
-		watchdogMgr.beat stage: "converting_glb"
+		try (watchdogMgr.beat stage: "converting_glb") catch()
 		logMessage ("Converting to GLB: " + glbName) postLogs: postLogs
 		local glb = ::API_BATCH_GLB_CONVERTER.run scn: scn out: d ao: ao isNormalizeTiling: false
 
@@ -4273,7 +4331,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		if (convertToBlend) do (
 			if (blendGLBMgr.isBlenderExist()) then (
 				lblStatus.caption = "Converting to Blender..."
-				watchdogMgr.beat stage: "converting_blend"
+				try (watchdogMgr.beat stage: "converting_blend") catch()
 				logMessage ("Converting to Blender: " + blendName) postLogs: postLogs
 
 				blendGLBMgr.init glb: glb name: blendName
@@ -4297,7 +4355,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		if (convertToSketchup) do (
 			if (skpMgr.isSketchupExist()) then (
 				lblStatus.caption = "Converting to SketchUp..."
-				watchdogMgr.beat stage: "converting_skp"
+				try (watchdogMgr.beat stage: "converting_skp") catch()
 				logMessage ("Converting to SketchUp: " + skpName) postLogs: postLogs
 
 				skpMgr.init name: skpName glb: glb
@@ -4409,22 +4467,22 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local file = d + fname
 		-- Clear all files in folder
 		lblStatus.caption = "Clearing working folder..."
-		watchdogMgr.beat stage: "clearing_working_folder"
+		try (watchdogMgr.beat stage: "clearing_working_folder") catch()
 		clearFolder d
 
 		-- Download file
 		postProcessLog "Downloading source file..."
 		lblStatus.caption = "Downloading source file..."
-		watchdogMgr.beat stage: "downloading_source"
+		try (watchdogMgr.beat stage: "downloading_source") catch()
 
 		downloadMgr.download download_url file
 
 		postProcessLog "Source file downloaded. Validating file..."
 		lblStatus.caption = "Validating downloaded file..."
-		watchdogMgr.beat stage: "validating_download"
+		try (watchdogMgr.beat stage: "validating_download") catch()
 
 		-- Tell that we try conversion
-		watchdogMgr.beat stage: "post_attempt"
+		try (watchdogMgr.beat stage: "post_attempt") catch()
 		requestMgr.postAttempt()
 
 		-- Is file not valid immediately request next file
@@ -4454,7 +4512,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		lblStatus.caption = "Extracting archive and loading scene..."
 		postProcessLog "Extracting archive and loading scene..."
-		watchdogMgr.beat stage: "loading_scene"
+		try (watchdogMgr.beat stage: "loading_scene") catch()
 		local r = ::API_BATCH_GLB_CONVERTER.load file
 
 		if (not r.opened) do (
@@ -4469,11 +4527,11 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local sourceDeleteDir = r.del
 
 		if (splitByLayers and doesFileExist sourceSceneFile) then (
-			watchdogMgr.beat stage: "checking_layers"
+			try (watchdogMgr.beat stage: "checking_layers") catch()
 			postProcessLog ("Scene has " + (layerNames.count as string) + " layers with objects. Converting each layer separately.")
 			logLayerPolyStats layerNames
 
-			watchdogMgr.beat stage: "checking_polygons"
+			try (watchdogMgr.beat stage: "checking_polygons") catch()
 			local failedLayerStats = getLayersOverPolyLimit layerNames
 			if (failedLayerStats.count > 0) do (
 				local m = "Layer polygon limit exceeded. Limit per layer: " + (_MAX_ALLOWED_POLYS as string) + ". Failed layers: " + (formatPolyStatsList failedLayerStats) + "."
@@ -4491,7 +4549,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 				lblStatus.caption = "Loading layer " + (i as string) + " of " + (layerNames.count as string) + "..."
 				postProcessLog ("Loading source scene for layer " + (i as string) + ": " + layerName)
-				watchdogMgr.beat stage: ("loading_layer_" + (i as string))
+				try (watchdogMgr.beat stage: ("loading_layer_" + (i as string))) catch()
 				loadMaxFile sourceSceneFile quiet: true
 				resetLoadedSceneState()
 
@@ -4500,7 +4558,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 					postProcessLog ("[Warning] Layer has no geometry after reload. Skipping layer: " + layerName)
 				) else (
 					postProcessLog ("Converting layer " + (i as string) + " of " + (layerNames.count as string) + ": " + layerName)
-					watchdogMgr.beat stage: ("converting_layer_" + (i as string))
+					try (watchdogMgr.beat stage: ("converting_layer_" + (i as string))) catch()
 					convertSceneVariant r glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles
 				)
 			)
@@ -4511,7 +4569,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				postProcessLog "[Warning] Multiple layers were detected, but the source scene file could not be reloaded. Converting the whole scene."
 			)
 
-			watchdogMgr.beat stage: "checking_polygons"
+			try (watchdogMgr.beat stage: "checking_polygons") catch()
 			local sceneStat = getGeometryPolyStats (geometry as array) label: "Whole scene"
 			postProcessLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
 			postProcessLog ("Scene polygon count: " + (formatPolyStats sceneStat))
@@ -4523,7 +4581,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			convertSceneVariant r (outputBaseName + "-GLB") (outputBaseName + "-BLEND") (outputBaseName + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles
 		)
 
-		watchdogMgr.beat stage: "collecting_outputs"
+		try (watchdogMgr.beat stage: "collecting_outputs") catch()
 		local cntExistingFiles = checkExistingFiles expectedExitFiles
 		if (cntExistingFiles != expectedExitFiles.count) then (
 			local m = "Not all files were converted. Expected: " + expectedExitFiles.count as string + ". Found: " + cntExistingFiles as string + "."
@@ -4538,13 +4596,13 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		lblStatus.caption = "Uploading files to S3..."
 		postProcessLog "Uploading files to S3..."
-		watchdogMgr.beat stage: "uploading_files"
+		try (watchdogMgr.beat stage: "uploading_files") catch()
 
 		local uploadIndex = 0
 		for f in expectedExitFiles do (
 			uploadIndex += 1
 			local fileName = filenameFromPath f
-			watchdogMgr.beat stage: ("uploading_file_" + (uploadIndex as string))
+			try (watchdogMgr.beat stage: ("uploading_file_" + (uploadIndex as string))) catch()
 
 			if (not doesFileExist f) then (
 				local m = "[Error] Upload skipped. File does not exist: " + fileName
@@ -4576,7 +4634,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			local result_json = buildUploadedFilesResultJson uploadedFiles
 			postProcessLog ("Result JSON: " + result_json)
 
-			watchdogMgr.beat stage: "posting_result"
+			try (watchdogMgr.beat stage: "posting_result") catch()
 			requestMgr.postStatus #success txt: successMessage result_json: result_json
 			markProcessedFileInSession()
 			sendProcessingTelegramReport true slug source_original_name expectedExitFiles uploadedFiles failedFiles result_json
@@ -4584,7 +4642,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		) else (
 			local m = "No files were uploaded to S3. Failed files: " + (implodeString failedFiles)
 			lblStatus.caption = "No files were uploaded."
-			watchdogMgr.beat stage: "posting_error"
+			try (watchdogMgr.beat stage: "posting_error") catch()
 			requestMgr.postStatus #error txt: m
 			postProcessLog m
 			markProcessedFileInSession()

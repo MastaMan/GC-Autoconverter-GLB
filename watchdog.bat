@@ -6,7 +6,7 @@ title 3ds Max Watchdog
 set "WATCHDOG_INI=%~dp0watchdog.ini"
 set "SETTINGS_INI=%~dp0global@settings.ini"
 set "SETTINGS_SEC=GC-Autoconverter-GLB"
-set "CHECK_INTERVAL_SEC=60"
+set "CHECK_INTERVAL_SEC=10"
 
 if exist "%WATCHDOG_INI%" del /f /q "%WATCHDOG_INI%" >nul 2>nul
 
