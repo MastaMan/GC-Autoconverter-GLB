@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.0.7
+VERSION=1.0.8
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -41,6 +41,12 @@ Auto Converter to GLB/SKP/BLEND script=
 + Added: Configurable watchdog timeout in Settings=
 + Improved: Converted output file names now include autoconversion id and slug=
 + Improved: Watchdog uses UTC Unix timestamps consistently between MaxScript and BAT=
+
+[1.0.8]
++ Added: Web API manual request tester=
++ Improved: Web API Test button opens the manual request tester=
++ Improved: JSON builder supports bool, integer, integer64 and float values=
++ Improved: Request tester log uses a multiline .NET text box with readable JSON=
 
 [FILES]
 Install.mcr=
@@ -89,6 +95,7 @@ sketchup-convert.bat=
 template.skp=
 listener-error-observer.ms=
 test-s3-uploader.ms=
+test-request.ms=
 
 
 [SCRIPT]
@@ -197,6 +204,58 @@ struct JsonWrapper (
 		return s
 	),
 
+	fn repeatText txt count = (
+		local result = ""
+		for i = 1 to count do result += txt
+		return result
+	),
+
+	fn buildJsonValue v indentLevel: 1 t: "\t" n: "\n" q: "\"" = (
+		case classOf v of (
+			undefined: (q + q)
+			UndefinedClass: (q + q)
+			String: (
+				if (v == "true" or v == "false") then v else (q + (escapeJsonString v) + q)
+			)
+			BooleanClass: (
+				if v then "true" else "false"
+			)
+			Integer: (
+				v as string
+			)
+			Integer64: (
+				v as string
+			)
+			Float: (
+				v as string
+			)
+			Array: (
+				local result = "[" + n
+				for ii in 1 to v.count do (
+					local z = v[ii]
+					local comma2 = if (ii != v.count) then ("," + n) else n
+
+					if (classOf z == Array) then (
+						result += (this.repeatText t (indentLevel + 1)) + "{" + n
+						for iii in 1 to z.count do (
+							local pp = z[iii]
+							local comma3 = if (iii != z.count) then ("," + n) else n
+							result += (this.repeatText t (indentLevel + 2)) + q + pp[1] + q + ": " + (this.buildJsonValue pp[2] indentLevel: (indentLevel + 2) t: t n: n q: q) + comma3
+						)
+						result += (this.repeatText t (indentLevel + 1)) + "}" + comma2
+					) else (
+						result += (this.repeatText t (indentLevel + 1)) + (this.buildJsonValue z indentLevel: (indentLevel + 1) t: t n: n q: q) + comma2
+					)
+				)
+				result += (this.repeatText t indentLevel) + "]"
+				result
+			)
+			default: (
+				q + (escapeJsonString v) + q
+			)
+		)
+	),
+
 	fn buildJson data = (
 		local t = "\t"
 		local n = "\n"
@@ -208,33 +267,7 @@ struct JsonWrapper (
 			local comma = if (i != data.count) then ("," + n) else n
 			j += t + q + p[1] + q + ": "
 
-			local qq = q
-			if (p[2] == "true" or p[2] == "false") do qq = ""
-
-			case classOf p[2] of (
-				String:  j += qq + (escapeJsonString p[2]) + qq + comma
-				Array: (
-					j += "[" + n
-					for ii in 1 to p[2].count do (
-						local z = p[2][ii]
-						local comma2 = if (ii != p[2].count) then ("," + n) else n
-
-						if (classOf z == Array) then (
-							j += t + t + "{" + n
-								for iii in 1 to z.count do (
-									local pp = z[iii]
-									local comma3 = if (iii != z.count) then ("," + n) else n
-
-									j += t + t + t + q + pp[1] + q + ": \"" + (escapeJsonString pp[2]) + q + comma3
-								)
-							j += t + t + "}" + comma2
-						) else (
-							j += t + t + q + (escapeJsonString z) + q + comma2
-						)
-					)
-					j += t + "]" + comma
-				)
-			)
+			j += (this.buildJsonValue p[2] indentLevel: 1 t: t n: n q: q) + comma
 		)
 
 		j += "}"
@@ -4827,23 +4860,14 @@ rollout _rGCAutoGLBConverter_Credentails "Credentials" category: 2 (
 			return false
 		)
 
-		local response = requestMgr.getQueue()
-		if (response == undefined or response == "") do (
-			messageBox (modeLabel + " Web API test failed. Empty response.") title: "Web API Test"
+		local testScript = (getFileNamePath (getThisScriptFileName())) + "test-request.ms"
+		if (not doesFileExist testScript) do (
+			messageBox "Cannot find test-request.ms. Please reinstall or update the script files." title: "Web API Test"
 			return false
 		)
 
-		local jr = JsonReaderWrapper()
-		jr.read response
-		local isSuccess = jr.getBool "success"
-
-		if (isSuccess) then (
-			messageBox (modeLabel + " Web API test passed.") title: "Web API Test"
-			return true
-		) else (
-			messageBox (modeLabel + " Web API test failed. Response does not contain success:true.") title: "Web API Test"
-			return false
-		)
+		fileIn testScript
+		return true
 	)
 
 	fn testAwsCredentials = (
