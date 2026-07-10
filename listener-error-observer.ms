@@ -35,6 +35,8 @@ rollout listenerObserver "Listener Observer" (
 		local currentPath = getFilenamePath (getThisScriptFilename())
 		local dontRun = if (::MAX_AUTOSTART == true) then "dontrun" else "run"
 		
+		deleteFile (currentPath + "watchdog.ini")
+		
 		local args = f + ";" + dontRun
 		args = substituteString args "/" @"\"
 		
