@@ -30,6 +30,11 @@ set "NOW="
 set "MAX_STARTED_AT="
 set "MAX_AGE="
 set "MAX_GRACE_REMAINING="
+set "ATTEMPTS="
+set "ATTEMPT_A_ID="
+set "ATTEMPT_SLUG="
+set "ATTEMPT_STAGE="
+set "LAST_TIMEOUT_AT="
 
 for /f "tokens=*" %%A in ('powershell -NoP -C "(Get-Date).ToString(\"yyyy-MM-dd HH:mm:ss\")"') do set "NOW_TEXT=%%A"
 for /f %%A in ('powershell -NoP -C "[int64]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"') do set "NOW=%%A"
@@ -48,13 +53,28 @@ if %TIMEOUT_MIN_NUM% LSS 1 set "TIMEOUT_MIN_NUM=15"
 set /a TIMEOUT_SEC_NUM=TIMEOUT_MIN_NUM*60
 
 if exist "%WATCHDOG_INI%" (
-	for /f "tokens=1,2,3,4,5 delims=|" %%A in ('powershell -NoP -ExecutionPolicy Bypass -Command "$ini=$env:WATCHDOG_INI; $data=@{slug='';a_id='';stage='';startedAt='';heartbeatAt=''}; if (Test-Path -LiteralPath $ini) { $inside=$false; foreach ($line in (Get-Content -LiteralPath $ini)) { $t=$line.Trim(); if ($t -ieq '[WATCHDOG]') { $inside=$true; continue }; if ($t.StartsWith('[')) { $inside=$false }; if ($inside -and $t -match '^(slug|a_id|stage|startedAt|heartbeatAt)=(.*)$') { $data[$Matches[1]]=$Matches[2].Trim() } } }; Write-Output ($data.slug + '|' + $data.a_id + '|' + $data.stage + '|' + $data.startedAt + '|' + $data.heartbeatAt)"') do (
+	for /f "tokens=1-10 delims=|" %%A in ('powershell -NoP -ExecutionPolicy Bypass -Command "$ini=$env:WATCHDOG_INI; $empty='__WD_EMPTY__'; function E($v){ if ([string]::IsNullOrEmpty($v)) { $empty } else { $v } }; $data=@{slug='';a_id='';stage='';startedAt='';heartbeatAt='';attempts='';attemptAId='';attemptSlug='';attemptStage='';lastTimeoutAt=''}; if (Test-Path -LiteralPath $ini) { $inside=$false; foreach ($line in (Get-Content -LiteralPath $ini)) { $t=$line.Trim(); if ($t -ieq '[WATCHDOG]') { $inside=$true; continue }; if ($t.StartsWith('[')) { $inside=$false }; if ($inside -and $t -match '^(slug|a_id|stage|startedAt|heartbeatAt|attempts|attemptAId|attemptSlug|attemptStage|lastTimeoutAt)=(.*)$') { $data[$Matches[1]]=$Matches[2].Trim() } } }; Write-Output ((E $data.slug) + '|' + (E $data.a_id) + '|' + (E $data.stage) + '|' + (E $data.startedAt) + '|' + (E $data.heartbeatAt) + '|' + (E $data.attempts) + '|' + (E $data.attemptAId) + '|' + (E $data.attemptSlug) + '|' + (E $data.attemptStage) + '|' + (E $data.lastTimeoutAt))"') do (
 		set "SLUG=%%~A"
 		set "A_ID=%%~B"
 		set "STAGE=%%~C"
 		set "STARTED_AT=%%~D"
 		set "HEARTBEAT_AT=%%~E"
+		set "ATTEMPTS=%%~F"
+		set "ATTEMPT_A_ID=%%~G"
+		set "ATTEMPT_SLUG=%%~H"
+		set "ATTEMPT_STAGE=%%~I"
+		set "LAST_TIMEOUT_AT=%%~J"
 	)
+	if "!SLUG!"=="__WD_EMPTY__" set "SLUG="
+	if "!A_ID!"=="__WD_EMPTY__" set "A_ID="
+	if "!STAGE!"=="__WD_EMPTY__" set "STAGE="
+	if "!STARTED_AT!"=="__WD_EMPTY__" set "STARTED_AT="
+	if "!HEARTBEAT_AT!"=="__WD_EMPTY__" set "HEARTBEAT_AT="
+	if "!ATTEMPTS!"=="__WD_EMPTY__" set "ATTEMPTS="
+	if "!ATTEMPT_A_ID!"=="__WD_EMPTY__" set "ATTEMPT_A_ID="
+	if "!ATTEMPT_SLUG!"=="__WD_EMPTY__" set "ATTEMPT_SLUG="
+	if "!ATTEMPT_STAGE!"=="__WD_EMPTY__" set "ATTEMPT_STAGE="
+	if "!LAST_TIMEOUT_AT!"=="__WD_EMPTY__" set "LAST_TIMEOUT_AT="
 ) else (
 	set "STATE=Idle"
 	set "ACTION=No watchdog.ini. Waiting for MaxScript to create it."
@@ -110,9 +130,8 @@ if %MAX_STARTED_AT_NUM% LEQ 0 (
 
 set /a STALE_LIMIT=MAX_STARTED_AT_NUM-5
 if %HEARTBEAT_AT_NUM% LSS %STALE_LIMIT% (
-	if exist "%WATCHDOG_INI%" del /f /q "%WATCHDOG_INI%" >nul 2>nul
 	set "STATE=Idle"
-	set "ACTION=Removed stale watchdog.ini from previous 3ds Max process."
+	set "ACTION=Stale watchdog heartbeat from previous 3ds Max process. Waiting for MaxScript to clear active state."
 	set "SLUG="
 	set "A_ID="
 	set "STAGE="
@@ -148,11 +167,11 @@ if %ELAPSED% GEQ %TIMEOUT_SEC_NUM% if %MAX_AGE_NUM% GEQ %TIMEOUT_SEC_NUM% (
 	echo timeout:    !TIMEOUT_SEC_NUM! sec
 	echo.
 	echo Killing 3ds Max...
+	echo Writing timeout attempt to watchdog.ini...
+	powershell -NoP -ExecutionPolicy Bypass -Command "$ini=$env:WATCHDOG_INI; $prevAId=''; $prevSlug=''; $prevAttemptsText='0'; if (Test-Path -LiteralPath $ini) { foreach ($line in (Get-Content -LiteralPath $ini)) { $t=$line.Trim(); if ($t -match '^attemptAId=(.*)$') { $prevAId=$Matches[1].Trim() }; if ($t -match '^attemptSlug=(.*)$') { $prevSlug=$Matches[1].Trim() }; if ($t -match '^attempts=(.*)$') { $prevAttemptsText=$Matches[1].Trim() } } }; $prevAttempts=0; [void][int]::TryParse($prevAttemptsText, [ref]$prevAttempts); if ($prevAId -eq $env:A_ID -and $prevSlug -eq $env:SLUG) { $attempts=$prevAttempts + 1 } else { $attempts=1 }; $lines=@('[WATCHDOG]','slug=','a_id=','stage=','startedAt=','heartbeatAt=',('attempts=' + $attempts),('attemptAId=' + $env:A_ID),('attemptSlug=' + $env:SLUG),('attemptStage=' + $env:STAGE),('lastTimeoutAt=' + $env:NOW)); Set-Content -LiteralPath $ini -Value $lines -Encoding ASCII"
 	taskkill /F /T /IM 3dsmax.exe
 	set "KILL_EXIT_CODE=!ERRORLEVEL!"
 	echo taskkill exit code: !KILL_EXIT_CODE!
-	echo Removing watchdog.ini...
-	if exist "%WATCHDOG_INI%" del /f /q "%WATCHDOG_INI%" >nul 2>nul
 	set "STATE=Idle"
 	set "ACTION=3ds Max was killed. Waiting for Desktop bat to restart it."
 	set "SLUG="
@@ -218,6 +237,10 @@ echo State:           !STATE!
 echo Action:          !ACTION!
 echo Timeout:         !TIMEOUT_MIN_NUM! min ^(!TIMEOUT_SEC_NUM! sec^)
 echo nowUtc:          !DISPLAY_NOW!
+echo Attempts:        !ATTEMPTS!
+echo Attempt file:    !ATTEMPT_A_ID! ^| !ATTEMPT_SLUG!
+echo Attempt stage:   !ATTEMPT_STAGE!
+echo Last timeout:    !LAST_TIMEOUT_AT!
 echo.
 if defined SLUG (
 	echo a_id ^| slug:     !A_ID! ^| !SLUG!

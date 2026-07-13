@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.0
+VERSION=1.1.1
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -55,6 +55,12 @@ Auto Converter to GLB/SKP/BLEND script=
 
 [1.1.0]
 * Changed: Simplified UI=
+
+[1.1.1]
++ Improved: Watchdog keeps timeout attempt history in watchdog.ini=
++ Improved: AO baking is skipped on retry after AO-related watchdog timeout=
++ Improved: Watchdog console shows last timeout attempt details=
++ Improved: Corona AO bake tries to show the DiffuseColor channel in VFB=
 
 [FILES]
 Install.mcr=
@@ -1196,7 +1202,49 @@ struct watchdogWrapper (
 		return trimRight ((now.ToUnixTimeSeconds()) as string) "L"
 	),
 
+	fn isAttemptFile slug a_id = (
+		local attemptSlug = getIniSetting this.ini this.sec "attemptSlug"
+		local attemptAId = getIniSetting this.ini this.sec "attemptAId"
+		return (attemptSlug == (slug as string) and attemptAId == (a_id as string))
+	),
+
+	fn getAttemptsFor slug a_id = (
+		if (not this.isAttemptFile slug a_id) do return 0
+		local attempts = try ((getIniSetting this.ini this.sec "attempts") as integer) catch (0)
+		if (attempts < 0) do attempts = 0
+		return attempts
+	),
+
+	fn getAttemptStageFor slug a_id = (
+		if (not this.isAttemptFile slug a_id) do return ""
+		local attemptStage = getIniSetting this.ini this.sec "attemptStage"
+		if (attemptStage == undefined) do attemptStage = ""
+		return attemptStage
+	),
+
+	fn isAOAttemptStage stage = (
+		if (stage == undefined) do return false
+		stage = stage as string
+		return (
+			(findString stage "auto_unwrap") != undefined or
+			(findString stage "bake_corona_ao") != undefined or
+			(findString stage "bake_xnormal_ao") != undefined or
+			(findString stage "create_ao_map") != undefined or
+			(findString stage "set_ao_map") != undefined or
+			(findString stage "denoise_ao") != undefined
+		)
+	),
+
+	fn clearAttemptState = (
+		setIniSetting this.ini this.sec "attempts" ""
+		setIniSetting this.ini this.sec "attemptAId" ""
+		setIniSetting this.ini this.sec "attemptSlug" ""
+		setIniSetting this.ini this.sec "attemptStage" ""
+		setIniSetting this.ini this.sec "lastTimeoutAt" ""
+	),
+
 	fn start slug a_id stage: "in_progress" = (
+		if (not this.isAttemptFile slug a_id) do this.clearAttemptState()
 		local startedAt = this.nowSec()
 		setIniSetting this.ini this.sec "slug" (slug as string)
 		setIniSetting this.ini this.sec "a_id" (a_id as string)
@@ -3026,6 +3074,18 @@ struct BatchGLBConverterWrapper (
 		sysInfo.currentDir = curDir
 	),
 
+	fn selectCoronaVfbChannel channelName = (
+		local r = false
+		try (::CoronaRenderer.CoronaFp.setDisplayedChannel channelName; r = true) catch()
+		try (::CoronaRenderer.CoronaFp.setCurrentChannel channelName; r = true) catch()
+		try (::CoronaRenderer.CoronaFp.setVfbChannel channelName; r = true) catch()
+		try (::CoronaRenderer.CoronaFp.setChannel channelName; r = true) catch()
+		try (renderers.current.vfbDisplayedChannel = channelName; r = true) catch()
+		try (renderers.current.vfbCurrentChannel = channelName; r = true) catch()
+		try (renderers.current.vfbChannel = channelName; r = true) catch()
+		return r
+	),
+
 	fn bakeCoronaAO obj filename ao: undefined = (
 		if (ao == undefined) do return false
 		try (watchdogMgr.beat stage: ("bake_corona_ao_prepare:" + obj.name)) catch()
@@ -3081,9 +3141,11 @@ struct BatchGLBConverterWrapper (
 		obj.INodeBakeProperties.bakeChannel = 2
 		obj.INodeBakeProperties.nDilations = 2
 		select obj
+		this.selectCoronaVfbChannel "Corona_DiffuseColor"
 
 		try (watchdogMgr.beat stage: ("bake_corona_ao_render:" + obj.name)) catch()
 		render rendertype:#bakeSelected vfb: true progressBar:true outputSize:[ao.resolution, ao.resolution] vfb: false
+		this.selectCoronaVfbChannel "Corona_DiffuseColor"
 
 		try (watchdogMgr.beat stage: ("bake_corona_ao_optimize:" + obj.name)) catch()
 		this.optimizeImages files: #(filename)
@@ -4512,6 +4574,14 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		ao.resolution = ::_rGCAutoGLBConverter_Settings.spnAOResolution.value
 		ao.denoise = ::_rGCAutoGLBConverter_Settings.cbxAODenoise.checked
 		ao.type = #corona
+		local watchdogAttempts = watchdogMgr.getAttemptsFor slug a_id
+		local watchdogAttemptStage = watchdogMgr.getAttemptStageFor slug a_id
+		if (ao.enabled and watchdogAttempts > 0 and (watchdogMgr.isAOAttemptStage watchdogAttemptStage)) do (
+			ao.enabled = false
+			local aoDisabledMsg = "Watchdog detected previous AO timeout for this file. AO baking is disabled for this attempt to skip auto unwrap. Attempts: " + (watchdogAttempts as string) + ". Last stage: " + watchdogAttemptStage
+			postProcessLog aoDisabledMsg
+			lblStatus.caption = "AO baking disabled after watchdog timeout."
+		)
 
 		lblStatus.caption = "Extracting archive and loading scene..."
 		postProcessLog "Extracting archive and loading scene..."
