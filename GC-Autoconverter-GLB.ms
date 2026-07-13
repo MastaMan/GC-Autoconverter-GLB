@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.1
+VERSION=1.1.2
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -62,6 +62,12 @@ Auto Converter to GLB/SKP/BLEND script=
 + Improved: Watchdog console shows last timeout attempt details=
 + Improved: Corona AO bake tries to show the DiffuseColor channel in VFB=
 
+[1.1.2]
+* Changed: Replaced UVAtlas AO unwrap with Blender unwrap=
++ Added: Blender unwrap manual test tool=
++ Added: Blender unwrap island repacking option=
+- Deleted: uvatlastool.exe from production file inventory=
+
 [FILES]
 Install.mcr=
 jpegoptim.exe=
@@ -72,7 +78,7 @@ denoise.bat=
 gltfpack.bat=
 vdenoise.xml=
 normalmap.exe=
-uvatlastool.exe=
+uvatlastool.exe=deleted
 xnormal.bat=deleted
 xnormal.xml=deleted
 lowes-viewer.zip=deleted
@@ -89,6 +95,7 @@ disable-windows-nags.reg=
 blender-screenshot.bat=
 blender-zoom-extends.py=
 blender-import-glb.py=
+blender-unwrap.py=
 blender-bg-import.bat=
 blender-gen-ini.py=
 blender-bg-run.bat=
@@ -111,6 +118,7 @@ template.skp=
 listener-error-observer.ms=
 test-s3-uploader.ms=
 test-request.ms=
+test_blender_unwrap.ms=
 
 
 [SCRIPT]
@@ -1233,7 +1241,7 @@ struct watchdogWrapper (
 			(findString stage "create_ao_map") != undefined or
 			(findString stage "set_ao_map") != undefined or
 			(findString stage "denoise_ao") != undefined or
-			(findString stage "uvatlas_") != undefined
+			(findString stage "blender_unwrap_") != undefined
 		)
 	),
 
@@ -2158,17 +2166,24 @@ struct UVAtlasToolWrapper (
 		return true
 	),
 
-	fn run inputFile outputFile resolution logFile: "" = (
+	fn run inputFile outputFile resolution quality: "QUALITY" adjacency: "GEOMETRIC" maxStretch: 0.5 gutter: 4.0 logFile: "" = (
 		lastError = ""
 		if (not this.isAvailable()) do return (this.setError ("uvatlastool.exe not found: " + this.exe))
 		if (not doesFileExist inputFile) do return (this.setError ("Input OBJ file does not exist: " + inputFile))
 
 		local textureSize = resolution as integer
 		if (textureSize < 1) do textureSize = 1024
+		if (quality != "FAST" and quality != "QUALITY") do quality = "QUALITY"
+		local adjacencyFlag = if (adjacency == "TOPOLOGICAL") then "-ta" else "-ga"
+		local stretchValue = maxStretch as float
+		if (stretchValue < 0.0) do stretchValue = 0.0
+		if (stretchValue > 1.0) do stretchValue = 1.0
+		local gutterValue = gutter as float
+		if (gutterValue < 0.0) do gutterValue = 0.0
 
 		if (logFile == "") do logFile = this.makeTempPath ("uvatlas_" + (timeStamp() as string) + ".log")
 		local batFile = this.makeTempPath ("uvatlas_" + (timeStamp() as string) + ".bat")
-		local command = "\"" + this.exe + "\" -ft obj -q FAST -w " + (textureSize as string) + " -h " + (textureSize as string) + " -g 2 -y -nologo -o \"" + outputFile + "\" -- \"" + inputFile + "\" > \"" + logFile + "\" 2>&1"
+		local command = "\"" + this.exe + "\" -ft obj -q " + quality + " " + adjacencyFlag + " -st " + (stretchValue as string) + " -g " + (gutterValue as string) + " -w " + (textureSize as string) + " -h " + (textureSize as string) + " -y -nologo -o \"" + outputFile + "\" -- \"" + inputFile + "\" > \"" + logFile + "\" 2>&1"
 		local batText = "@echo off\n" + command + "\n"
 		if (not this.writeTextFile batFile batText) do return (this.setError ("Cannot write UVAtlas command file: " + batFile))
 
@@ -2306,7 +2321,7 @@ struct UVAtlasToolWrapper (
 		return true
 	),
 
-	fn unwrap obj resolution: 1024 targetChannel: 2 = (
+	fn unwrap obj resolution: 1024 targetChannel: 2 quality: "QUALITY" adjacency: "GEOMETRIC" maxStretch: 0.5 gutter: 4.0 = (
 		if (obj == undefined or not isValidNode obj) do return false
 		if (not this.isAvailable()) do return false
 
@@ -2326,7 +2341,7 @@ struct UVAtlasToolWrapper (
 			local exportedFile = this.exportObjectToObj obj inputObj
 			if (exportedFile != undefined) do (
 				try (watchdogMgr.beat stage: ("uvatlas_run:" + obj.name)) catch()
-				local isProcessed = this.run inputObj outputObj resolution logFile: outputLog
+				local isProcessed = this.run inputObj outputObj resolution quality: quality adjacency: adjacency maxStretch: maxStretch gutter: gutter logFile: outputLog
 				if (isProcessed == true) do (
 					try (watchdogMgr.beat stage: ("uvatlas_copy_uv:" + obj.name)) catch()
 					isUnwrapped = this.applyObjUVsToMapChannel obj outputObj targetChannel: targetChannel
@@ -2338,6 +2353,300 @@ struct UVAtlasToolWrapper (
 		)
 
 		this.cleanupNodes #(importedObj)
+		this.cleanupFiles #(inputObj, inputMtl, outputObj, outputMtl, outputLog)
+		try (select previousSelection) catch()
+
+		if (isUnwrapped == true) then (
+			return true
+		) else (
+			return false
+		)
+	)
+)
+
+struct BlenderUnwrapWrapper (
+	currentPath = getFilenamePath (getThisScriptFilename()),
+	pythonScriptUnwrap = currentPath + "blender-unwrap.py",
+	lastError = "",
+
+	fn setError message = (
+		lastError = message as string
+		return false
+	),
+
+	fn getLastError = (
+		return lastError
+	),
+
+	fn getBlenderExe = (
+		local blenderExe = undefined
+		try (
+			local blender = BlenderGLBWrapper()
+			blenderExe = blender.getBlenderExe()
+		) catch()
+		return blenderExe
+	),
+
+	fn isAvailable = (
+		local blenderExe = this.getBlenderExe()
+		if (blenderExe == undefined or not doesFileExist blenderExe) do return false
+		if (not doesFileExist this.pythonScriptUnwrap) do return false
+		return true
+	),
+
+	fn makeTempPath filename = (
+		local tempDir = getDir #temp
+		if ((substring tempDir tempDir.count 1) != @"\") do tempDir += @"\"
+		local workDir = tempDir + @"GC-Autoconverter-GLB-BlenderUnwrap\"
+		makeDir workDir all: true
+		return workDir + filename
+	),
+
+	fn cleanupFiles files = (
+		for file in files where file != undefined and file != "" do (
+			try (if (doesFileExist file) do deleteFile file) catch()
+		)
+		return true
+	),
+
+	fn cleanupNodes nodes = (
+		for node in nodes where node != undefined and isValidNode node do (
+			try (delete node) catch()
+		)
+		return true
+	),
+
+	fn readTextFile file = (
+		if (file == undefined or file == "" or not doesFileExist file) do return ""
+
+		local inputStream = openFile file mode: "rt"
+		if (inputStream == undefined) do return ""
+
+		local result = ""
+		while (not eof inputStream) do (
+			local line = readLine inputStream
+			if (line != undefined) do result += line + "\n"
+		)
+
+		close inputStream
+		return result
+	),
+
+	fn writeTextFile file text = (
+		local outputStream = createFile file
+		if (outputStream == undefined) do return false
+		format "%" text to: outputStream
+		close outputStream
+		return true
+	),
+
+	fn normalizeFloatText value = (
+		local textValue = value as string
+		textValue = substituteString textValue "," "."
+		return textValue
+	),
+
+	fn boolArg value = (
+		if (value == true) then (
+			return "true"
+		) else (
+			return "false"
+		)
+	),
+
+	fn run inputFile outputFile resolution unwrapMethod: "smart_project" angleLimit: 66.6 islandMargin: 0.02 packIslands: true logFile: "" = (
+		lastError = ""
+
+		local blenderExe = this.getBlenderExe()
+		if (blenderExe == undefined or not doesFileExist blenderExe) do return (this.setError "Blender was not found.")
+		if (not doesFileExist this.pythonScriptUnwrap) do return (this.setError ("Blender unwrap script was not found: " + this.pythonScriptUnwrap))
+		if (not doesFileExist inputFile) do return (this.setError ("Input OBJ file does not exist: " + inputFile))
+
+		local textureSize = resolution as integer
+		if (textureSize < 1) do textureSize = 1024
+		if (unwrapMethod != "lightmap_pack") do unwrapMethod = "smart_project"
+
+		local angleValue = angleLimit as float
+		if (angleValue < 1.0) do angleValue = 1.0
+		if (angleValue > 89.0) do angleValue = 89.0
+
+		local marginValue = islandMargin as float
+		if (marginValue < 0.0) do marginValue = 0.0
+		if (marginValue > 1.0) do marginValue = 1.0
+
+		if (logFile == "") do logFile = this.makeTempPath ("blender_unwrap_" + (timeStamp() as string) + ".log")
+		local batFile = this.makeTempPath ("blender_unwrap_" + (timeStamp() as string) + ".bat")
+		local command = "\"" + blenderExe + "\" -b -P \"" + this.pythonScriptUnwrap + "\" -- \"" + inputFile + "\" \"" + outputFile + "\" " + (textureSize as string) + " " + unwrapMethod + " " + (this.normalizeFloatText angleValue) + " " + (this.normalizeFloatText marginValue) + " " + (this.boolArg packIslands) + " > \"" + logFile + "\" 2>&1"
+		local batText = "@echo off\n" + command + "\n"
+		if (not this.writeTextFile batFile batText) do return (this.setError ("Cannot write Blender unwrap command file: " + batFile))
+
+		local exitCode = 0
+		local curDir = sysInfo.currentDir
+		sysInfo.currentDir = currentPath
+		hiddenDosCommand ("\"" + batFile + "\"") exitCode: &exitCode donotwait: false
+		sysInfo.currentDir = curDir
+
+		local commandOutput = this.readTextFile logFile
+		this.cleanupFiles #(batFile)
+
+		if (exitCode != 0) do return (this.setError ("Blender unwrap command failed. Exit code: " + (exitCode as string) + "\n\nCommand output:\n" + commandOutput))
+		if (not doesFileExist outputFile) do return (this.setError ("Blender unwrap output OBJ was not created: " + outputFile + "\n\nCommand output:\n" + commandOutput))
+		return true
+	),
+
+	fn exportObjectToObj obj outputFile = (
+		if (obj == undefined or not isValidNode obj) do (
+			this.setError "Cannot export invalid object to OBJ."
+			return undefined
+		)
+
+		local sourceClone = undefined
+		try (
+			sourceClone = snapshot obj
+			sourceClone.name = "__blender_unwrap_export_" + (timeStamp() as string)
+			convertToMesh sourceClone
+			select sourceClone
+			exportFile outputFile #noPrompt selectedOnly: true
+		) catch (
+			this.cleanupNodes #(sourceClone)
+			this.setError ("OBJ export failed for object: " + obj.name)
+			return undefined
+		)
+
+		this.cleanupNodes #(sourceClone)
+		if (doesFileExist outputFile) then (
+			return outputFile
+		) else (
+			this.setError ("OBJ export did not create file: " + outputFile)
+			return undefined
+		)
+	),
+
+	fn parseObjFaceVertex token = (
+		local parts = filterString token "/"
+		if (parts.count < 2) do return 0
+		local mapVertIndex = try (parts[2] as integer) catch (0)
+		return mapVertIndex
+	),
+
+	fn parseUVsFromObj objFile = (
+		local mapVerts = #()
+		local mapFaces = #()
+
+		if (not doesFileExist objFile) do (
+			this.setError ("Cannot parse missing OBJ file: " + objFile)
+			return #(#(), #())
+		)
+
+		local inputStream = openFile objFile mode: "rt"
+		if (inputStream == undefined) do (
+			this.setError ("Cannot open OBJ file: " + objFile)
+			return #(#(), #())
+		)
+
+		while (not eof inputStream) do (
+			local line = readLine inputStream
+			if (line != undefined) do (
+				line = trimLeft (trimRight line)
+				if (line.count >= 3 and (substring line 1 3) == "vt ") do (
+					local parts = filterString line " \t"
+					if (parts.count >= 3) do (
+						local u = try (parts[2] as float) catch (0.0)
+						local v = try (parts[3] as float) catch (0.0)
+						append mapVerts [u, v, 0]
+					)
+				)
+
+				if (line.count >= 2 and (substring line 1 2) == "f ") do (
+					local parts = filterString line " \t"
+					if (parts.count >= 4) do (
+						local firstMapVert = this.parseObjFaceVertex parts[2]
+						for faceTokenIndex in 3 to (parts.count - 1) do (
+							local secondMapVert = this.parseObjFaceVertex parts[faceTokenIndex]
+							local thirdMapVert = this.parseObjFaceVertex parts[faceTokenIndex + 1]
+							if (firstMapVert > 0 and secondMapVert > 0 and thirdMapVert > 0) do (
+								append mapFaces [firstMapVert, secondMapVert, thirdMapVert]
+							)
+						)
+					)
+				)
+			)
+		)
+
+		close inputStream
+		return #(mapVerts, mapFaces)
+	),
+
+	fn applyObjUVsToMapChannel targetObj objFile targetChannel: 2 = (
+		if (targetObj == undefined or not isValidNode targetObj) do return (this.setError "Cannot apply UVs to invalid target object.")
+
+		try (convertToMesh targetObj) catch()
+
+		local targetMesh = targetObj.mesh
+		local targetFaces = try (meshop.getNumFaces targetMesh) catch (0)
+		if (targetFaces < 1) do return (this.setError ("Target object has no mesh faces: " + targetObj.name))
+
+		local parsedData = this.parseUVsFromObj objFile
+		local mapVerts = parsedData[1]
+		local mapFaces = parsedData[2]
+
+		if (mapVerts.count < 1) do return (this.setError "Blender unwrap output OBJ has no texture vertices.")
+		if (mapFaces.count != targetFaces) do return (this.setError ("Blender unwrap output face count does not match target object. Output faces: " + (mapFaces.count as string) + ", target faces: " + (targetFaces as string)))
+
+		local requiredMapCount = targetChannel + 1
+		try (
+			local currentMapCount = meshop.getNumMaps targetMesh
+			if (currentMapCount < requiredMapCount) do meshop.setNumMaps targetMesh requiredMapCount keep: true
+		) catch (
+			try (meshop.setNumMaps targetMesh requiredMapCount true) catch()
+		)
+
+		try (meshop.setMapSupport targetMesh targetChannel true) catch (return (this.setError ("Cannot enable map channel " + (targetChannel as string))))
+		try (meshop.setNumMapVerts targetMesh targetChannel mapVerts.count) catch (return (this.setError ("Cannot set map verts for channel " + (targetChannel as string))))
+		try (meshop.setNumMapFaces targetMesh targetChannel mapFaces.count) catch (return (this.setError ("Cannot set map faces for channel " + (targetChannel as string))))
+
+		for mapVertIndex in 1 to mapVerts.count do (
+			meshop.setMapVert targetMesh targetChannel mapVertIndex mapVerts[mapVertIndex]
+		)
+
+		for mapFaceIndex in 1 to mapFaces.count do (
+			meshop.setMapFace targetMesh targetChannel mapFaceIndex mapFaces[mapFaceIndex]
+		)
+
+		try (targetObj.mesh = targetMesh) catch()
+		try (update targetObj) catch()
+		return true
+	),
+
+	fn unwrap obj resolution: 1024 targetChannel: 2 unwrapMethod: "smart_project" angleLimit: 66.6 islandMargin: 0.02 packIslands: true = (
+		if (obj == undefined or not isValidNode obj) do return false
+
+		local previousSelection = selection as array
+		local uid = (timeStamp() as string) + "_" + ((random 1000 9999) as string)
+		local inputObj = this.makeTempPath ("blender_unwrap_in_" + uid + ".obj")
+		local inputMtl = this.makeTempPath ("blender_unwrap_in_" + uid + ".mtl")
+		local outputObj = this.makeTempPath ("blender_unwrap_out_" + uid + ".obj")
+		local outputMtl = this.makeTempPath ("blender_unwrap_out_" + uid + ".mtl")
+		local outputLog = this.makeTempPath ("blender_unwrap_out_" + uid + ".log")
+		local isUnwrapped = false
+		lastError = ""
+
+		try (
+			try (watchdogMgr.beat stage: ("blender_unwrap_export:" + obj.name)) catch()
+			local exportedFile = this.exportObjectToObj obj inputObj
+			if (exportedFile != undefined) do (
+				try (watchdogMgr.beat stage: ("blender_unwrap_run:" + obj.name)) catch()
+				local isProcessed = this.run inputObj outputObj resolution unwrapMethod: unwrapMethod angleLimit: angleLimit islandMargin: islandMargin packIslands: packIslands logFile: outputLog
+				if (isProcessed == true) do (
+					try (watchdogMgr.beat stage: ("blender_unwrap_copy_uv:" + obj.name)) catch()
+					isUnwrapped = this.applyObjUVsToMapChannel obj outputObj targetChannel: targetChannel
+				)
+			)
+		) catch (
+			isUnwrapped = false
+			if (lastError == "") do lastError = "Unexpected Blender unwrap error."
+		)
+
 		this.cleanupFiles #(inputObj, inputMtl, outputObj, outputMtl, outputLog)
 		try (select previousSelection) catch()
 
@@ -3259,7 +3568,8 @@ struct BatchGLBConverterWrapper (
 
 	fn getAOUnwrapMethod = (
 		local method = '*'.get "aoUnwrapMethod"
-		if (method != "uvatlas") do method = "max"
+		if (method == "uvatlas") do method = "blender"
+		if (method != "blender") do method = "max"
 		return method
 	),
 
@@ -3292,18 +3602,18 @@ struct BatchGLBConverterWrapper (
 		return true
 	),
 
-	fn autoUnwrapWithUVAtlas obj ao: undefined = (
+	fn autoUnwrapWithBlender obj ao: undefined = (
 		if (ao == undefined) do return false
 
-		local uvAtlas = UVAtlasToolWrapper()
-		if (not uvAtlas.isAvailable()) do (
-			print "[Warning] UVAtlas Tool unwrap is selected, but uvatlastool.exe was not found. AO baking will be skipped for this object."
+		local blenderUnwrap = BlenderUnwrapWrapper()
+		if (not blenderUnwrap.isAvailable()) do (
+			print "[Warning] Blender unwrap is selected, but Blender or blender-unwrap.py was not found. AO baking will be skipped for this object."
 			return false
 		)
 
-		local isUnwrapped = uvAtlas.unwrap obj resolution: ao.resolution targetChannel: 2
+		local isUnwrapped = blenderUnwrap.unwrap obj resolution: ao.resolution targetChannel: 2
 		if (isUnwrapped != true) do (
-			print ("[Warning] UVAtlas Tool unwrap failed for object: " + obj.name + ". AO baking will be skipped for this object.")
+			print ("[Warning] Blender unwrap failed for object: " + obj.name + ". AO baking will be skipped for this object.\n" + blenderUnwrap.getLastError())
 			return false
 		)
 
@@ -3312,8 +3622,8 @@ struct BatchGLBConverterWrapper (
 
 	fn autoUnwrap obj ao: undefined = (
 		local method = this.getAOUnwrapMethod()
-		if (method == "uvatlas") then (
-			return (this.autoUnwrapWithUVAtlas obj ao: ao)
+		if (method == "blender") then (
+			return (this.autoUnwrapWithBlender obj ao: ao)
 		) else (
 			return (this.autoUnwrapWithMax obj)
 		)
@@ -5444,7 +5754,7 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 	)
 
 	group "AO Unwrap Method" (
-		radiobuttons rdoAOUnwrapMethod labels: #("3ds Max Unwrap", "UVAtlas Tool") columns: 2 default: 1
+		radiobuttons rdoAOUnwrapMethod labels: #("3ds Max Unwrap", "Blender Unwrap") columns: 2 default: 1
 	)
 
 	group "Watchdog Settings" (
@@ -5463,7 +5773,7 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 
 		cbxAODenoise.checked = '*'.get "cbxAODenoise" type: #bool_false
 		local unwrapMethod = '*'.get "aoUnwrapMethod"
-		rdoAOUnwrapMethod.state = if (unwrapMethod == "uvatlas") then 2 else 1
+		rdoAOUnwrapMethod.state = if (unwrapMethod == "blender" or unwrapMethod == "uvatlas") then 2 else 1
 
 		spnWatchdogTimeoutMin.value = watchdogMgr.getTimeoutMin()
 		watchdogMgr.saveTimeout()
@@ -5475,7 +5785,7 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 	on spnAOResolution changed v do '*'.add  "spnAOResolution" v
 	on cbxAODenoise changed v do '*'.add  "cbxAODenoise" v
 	on rdoAOUnwrapMethod changed state do (
-		local unwrapMethod = if (state == 2) then "uvatlas" else "max"
+		local unwrapMethod = if (state == 2) then "blender" else "max"
 		'*'.add "aoUnwrapMethod" unwrapMethod
 	)
 	on spnWatchdogTimeoutMin changed v do (

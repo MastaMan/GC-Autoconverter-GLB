@@ -1,42 +1,42 @@
 /*
-	UVAtlas unwrap manual test
+	Blender unwrap manual test
 
 	Usage:
 	1. Run the main GC-Autoconverter-GLB.ms script first.
 	2. Select one geometry object in the current 3ds Max scene.
-	3. Run this file and click Run UVAtlas.
+	3. Run this file and click Run Blender Unwrap.
 
 	Notes:
-	- This test uses UVAtlasToolWrapper from the main script.
+	- This test uses BlenderUnwrapWrapper from the main script.
 	- It writes UVs to the selected target map channel.
 	- It does not use queue, Web API, S3, Telegram, or requestMgr.
 */
 
-try (destroyDialog _rGCTestUVAtlas) catch()
+try (destroyDialog _rGCTestBlenderUnwrap) catch()
 
-rollout _rGCTestUVAtlas "UVAtlas Test" width: 620 (
-	local lastResolutionKey = "testUVAtlasResolution"
-	local lastChannelKey = "testUVAtlasTargetChannel"
-	local lastQualityKey = "testUVAtlasQuality"
-	local lastAdjacencyKey = "testUVAtlasAdjacency"
-	local lastStretchKey = "testUVAtlasMaxStretch"
-	local lastGutterKey = "testUVAtlasGutter"
+rollout _rGCTestBlenderUnwrap "Blender Unwrap Test" width: 620 (
+	local lastResolutionKey = "testBlenderUnwrapResolution"
+	local lastChannelKey = "testBlenderUnwrapTargetChannel"
+	local lastMethodKey = "testBlenderUnwrapMethod"
+	local lastAngleKey = "testBlenderUnwrapAngleLimit"
+	local lastMarginKey = "testBlenderUnwrapIslandMargin"
+	local lastPackKey = "testBlenderUnwrapPackIslands"
 
 	group "Target" (
 		label lblSelection "Selected object: -" width: 580 align: #left
 		spinner spnResolution "Resolution:" range: [128, 8192, 1024] scale: 128 type: #integer fieldwidth: 80 align: #left across: 2
 		spinner spnTargetChannel "Target channel:" range: [1, 99, 2] type: #integer fieldwidth: 80 align: #left
-		dropdownlist ddlQuality "Quality:" items: #("QUALITY", "FAST") width: 180 across: 2
-		dropdownlist ddlAdjacency "Adjacency:" items: #("GEOMETRIC", "TOPOLOGICAL") width: 180
-		spinner spnMaxStretch "Max stretch:" range: [0.0, 1.0, 0.5] scale: 0.05 type: #float fieldwidth: 80 align: #left across: 2
-		spinner spnGutter "Gutter:" range: [0.0, 64.0, 4.0] scale: 1.0 type: #float fieldwidth: 80 align: #left
+		dropdownlist ddlMethod "Method:" items: #("smart_project", "lightmap_pack") width: 180
+		spinner spnAngleLimit "Angle limit:" range: [1.0, 89.0, 66.6] scale: 0.1 type: #float fieldwidth: 80 align: #left across: 2
+		spinner spnIslandMargin "Island margin:" range: [0.0, 1.0, 0.02] scale: 0.01 type: #float fieldwidth: 80 align: #left
+		checkbox cbxPackIslands "Pack islands after unwrap" checked: true align: #left
 	)
 
 	group "Result" (
 		label lblResult "Ready" width: 580 align: #left
 	)
 
-	button btnRun "Run UVAtlas" width: 140 align: #center
+	button btnRun "Run Blender Unwrap" width: 160 align: #center
 
 	group "Log" (
 		dotNetControl edtLog "System.Windows.Forms.TextBox" width: 580 height: 320
@@ -84,7 +84,7 @@ rollout _rGCTestUVAtlas "UVAtlas Test" width: 620 (
 
 	fn getWrapper = (
 		local wrapper = undefined
-		try (wrapper = UVAtlasToolWrapper()) catch()
+		try (wrapper = BlenderUnwrapWrapper()) catch()
 		return wrapper
 	)
 
@@ -133,45 +133,47 @@ rollout _rGCTestUVAtlas "UVAtlas Test" width: 620 (
 	fn loadSettings = (
 		local savedResolution = 0
 		local savedChannel = 0
-		local savedQuality = ""
-		local savedAdjacency = ""
-		local savedStretch = 0.0
-		local savedGutter = 0.0
+		local savedMethod = ""
+		local savedAngle = 0.0
+		local savedMargin = -1.0
+		local savedPack = ""
 		try (savedResolution = '*'.get lastResolutionKey type: #int) catch()
 		try (savedChannel = '*'.get lastChannelKey type: #int) catch()
-		try (savedQuality = '*'.get lastQualityKey) catch()
-		try (savedAdjacency = '*'.get lastAdjacencyKey) catch()
-		try (savedStretch = '*'.get lastStretchKey type: #float) catch()
-		try (savedGutter = '*'.get lastGutterKey type: #float) catch()
+		try (savedMethod = '*'.get lastMethodKey) catch()
+		try (savedAngle = '*'.get lastAngleKey type: #float) catch()
+		try (savedMargin = '*'.get lastMarginKey type: #float) catch()
+		try (savedPack = '*'.get lastPackKey) catch()
 		if (savedResolution >= 128) do spnResolution.value = savedResolution
 		if (savedChannel >= 1) do spnTargetChannel.value = savedChannel
-		ddlQuality.selection = if (savedQuality == "FAST") then 2 else 1
-		ddlAdjacency.selection = if (savedAdjacency == "TOPOLOGICAL") then 2 else 1
-		if (savedStretch > 0.0) do spnMaxStretch.value = savedStretch
-		if (savedGutter > 0.0) do spnGutter.value = savedGutter
+		ddlMethod.selection = if (savedMethod == "lightmap_pack") then 2 else 1
+		if (savedAngle > 0.0) do spnAngleLimit.value = savedAngle
+		if (savedMargin >= 0.0) do spnIslandMargin.value = savedMargin
+		cbxPackIslands.checked = savedPack != "false"
 		return true
 	)
 
 	fn saveSettings = (
 		try ('*'.add lastResolutionKey spnResolution.value) catch()
 		try ('*'.add lastChannelKey spnTargetChannel.value) catch()
-		try ('*'.add lastQualityKey ddlQuality.selected) catch()
-		try ('*'.add lastAdjacencyKey ddlAdjacency.selected) catch()
-		try ('*'.add lastStretchKey spnMaxStretch.value) catch()
-		try ('*'.add lastGutterKey spnGutter.value) catch()
+		try ('*'.add lastMethodKey ddlMethod.selected) catch()
+		try ('*'.add lastAngleKey spnAngleLimit.value) catch()
+		try ('*'.add lastMarginKey spnIslandMargin.value) catch()
+		try ('*'.add lastPackKey (cbxPackIslands.checked as string)) catch()
 		return true
 	)
 
 	fn validateWrapper wrapper = (
 		if (wrapper == undefined) do (
-			setResult "UVAtlasToolWrapper not found. Run the main script first."
-			messageBox "UVAtlasToolWrapper not found. Run GC-Autoconverter-GLB.ms first." title: "UVAtlas Test"
+			setResult "BlenderUnwrapWrapper not found. Run the main script first."
+			messageBox "BlenderUnwrapWrapper not found. Run GC-Autoconverter-GLB.ms first." title: "Blender Unwrap Test"
 			return false
 		)
 
 		if (not wrapper.isAvailable()) do (
-			setResult ("uvatlastool.exe not found: " + wrapper.exe)
-			messageBox ("uvatlastool.exe not found:\n" + wrapper.exe) title: "UVAtlas Test"
+			local blenderExe = wrapper.getBlenderExe()
+			local errorMessage = "Blender unwrap is not available.\n\nBlender: " + (blenderExe as string) + "\nScript: " + wrapper.pythonScriptUnwrap
+			setResult errorMessage
+			messageBox errorMessage title: "Blender Unwrap Test"
 			return false
 		)
 
@@ -221,7 +223,7 @@ rollout _rGCTestUVAtlas "UVAtlas Test" width: 620 (
 		local unwrapModifier = undefined
 		try (
 			previewObj = snapshot obj
-			previewObj.name = "__uvatlas_channel_" + (targetChannel as string) + "_preview_" + (timeStamp() as string)
+			previewObj.name = "__blender_unwrap_channel_" + (targetChannel as string) + "_preview_" + (timeStamp() as string)
 			convertToMesh previewObj
 			local isCopied = copyMapChannel previewObj targetChannel 1
 			if (isCopied != true) do (
@@ -256,7 +258,7 @@ rollout _rGCTestUVAtlas "UVAtlas Test" width: 620 (
 		local obj = getSelectedObject()
 		if (obj == undefined) do (
 			setResult "Select exactly one geometry object first."
-			messageBox "Select exactly one geometry object first." title: "UVAtlas Test"
+			messageBox "Select exactly one geometry object first." title: "Blender Unwrap Test"
 			return false
 		)
 
@@ -268,13 +270,12 @@ rollout _rGCTestUVAtlas "UVAtlas Test" width: 620 (
 		local userPropsBefore = getUserPropsLabel obj
 		local objectNameBefore = obj.name
 		local statsBefore = getMapStats obj targetChannel
-		local quality = ddlQuality.selected
-		local adjacency = ddlAdjacency.selected
+		local unwrapMethod = ddlMethod.selected
 
-		appendLog ("Running UVAtlas\nObject: " + obj.name + "\nResolution: " + (spnResolution.value as string) + "\nTarget channel: " + (targetChannel as string) + "\nQuality: " + quality + "\nAdjacency: " + adjacency + "\nMax stretch: " + (spnMaxStretch.value as string) + "\nGutter: " + (spnGutter.value as string) + "\nBefore: " + statsBefore + "\nMaterial before: " + materialBefore)
+		appendLog ("Running Blender unwrap\nObject: " + obj.name + "\nResolution: " + (spnResolution.value as string) + "\nTarget channel: " + (targetChannel as string) + "\nMethod: " + unwrapMethod + "\nAngle limit: " + (spnAngleLimit.value as string) + "\nIsland margin: " + (spnIslandMargin.value as string) + "\nPack islands: " + (cbxPackIslands.checked as string) + "\nBefore: " + statsBefore + "\nMaterial before: " + materialBefore)
 
 		local startedAt = timeStamp()
-		local isUnwrapped = wrapper.unwrap obj resolution: spnResolution.value targetChannel: targetChannel quality: quality adjacency: adjacency maxStretch: spnMaxStretch.value gutter: spnGutter.value
+		local isUnwrapped = wrapper.unwrap obj resolution: spnResolution.value targetChannel: targetChannel unwrapMethod: unwrapMethod angleLimit: spnAngleLimit.value islandMargin: spnIslandMargin.value packIslands: cbxPackIslands.checked
 		local elapsedMs = timeStamp() - startedAt
 		local wrapperError = ""
 		try (wrapperError = wrapper.getLastError()) catch()
@@ -290,13 +291,13 @@ rollout _rGCTestUVAtlas "UVAtlas Test" width: 620 (
 			local isEditorOpened = openUnwrapEditor obj targetChannel
 			setResult ("SUCCESS\nObject: " + obj.name + "\nElapsed: " + (elapsedMs as string) + " ms\nAfter: " + statsAfter + "\n" + preservationReport)
 			if (isEditorOpened == true) then (
-				messageBox ("UVAtlas unwrap finished.\n\n" + statsAfter + "\n\nA preview clone was created. UV channel " + (targetChannel as string) + " was copied to channel 1 on the clone, then opened in Unwrap UVW.") title: "UVAtlas Test"
+				messageBox ("Blender unwrap finished.\n\n" + statsAfter + "\n\nA preview clone was created. UV channel " + (targetChannel as string) + " was copied to channel 1 on the clone, then opened in Unwrap UVW.") title: "Blender Unwrap Test"
 			) else (
-				messageBox ("UVAtlas unwrap finished.\n\n" + statsAfter + "\n\nCould not open Unwrap UVW editor automatically.") title: "UVAtlas Test"
+				messageBox ("Blender unwrap finished.\n\n" + statsAfter + "\n\nCould not open Unwrap UVW editor automatically.") title: "Blender Unwrap Test"
 			)
 		) else (
 			setResult ("FAILED\nObject: " + obj.name + "\nElapsed: " + (elapsedMs as string) + " ms\nError: " + wrapperError + "\nBefore: " + statsBefore + "\nAfter: " + statsAfter + "\n" + preservationReport)
-			messageBox "UVAtlas unwrap failed. See the log for details." title: "UVAtlas Test"
+			messageBox "Blender unwrap failed. See the log for details." title: "Blender Unwrap Test"
 		)
 
 		refreshSelectionLabel()
@@ -319,36 +320,36 @@ rollout _rGCTestUVAtlas "UVAtlas Test" width: 620 (
 		return true
 	)
 
-	on ddlQuality selected itemIndex do (
+	on ddlMethod selected itemIndex do (
 		saveSettings()
 		return true
 	)
 
-	on ddlAdjacency selected itemIndex do (
+	on spnAngleLimit changed value do (
 		saveSettings()
 		return true
 	)
 
-	on spnMaxStretch changed value do (
+	on spnIslandMargin changed value do (
 		saveSettings()
 		return true
 	)
 
-	on spnGutter changed value do (
+	on cbxPackIslands changed value do (
 		saveSettings()
 		return true
 	)
 
-	on _rGCTestUVAtlas open do (
+	on _rGCTestBlenderUnwrap open do (
 		edtLog.Multiline = true
 		edtLog.ScrollBars = (dotNetClass "System.Windows.Forms.ScrollBars").Vertical
 		edtLog.WordWrap = false
 		edtLog.ReadOnly = true
 		loadSettings()
 		refreshSelectionLabel()
-		appendLog "Ready. Select one geometry object and click Run UVAtlas."
+		appendLog "Ready. Select one geometry object and click Run Blender Unwrap."
 		return true
 	)
 )
 
-createDialog _rGCTestUVAtlas
+createDialog _rGCTestBlenderUnwrap
