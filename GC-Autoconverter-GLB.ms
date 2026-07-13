@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.0.9
+VERSION=1.1.0
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -52,6 +52,9 @@ Auto Converter to GLB/SKP/BLEND script=
 + Improved: Watchdog heartbeat now reports more detailed GLB conversion stages=
 + Improved: Watchdog heartbeat calls are protected with try/catch=
 + Improved: Watchdog rereads INI state every 10 seconds=
+
+[1.1.0]
+* Changed: Simplified UI=
 
 [FILES]
 Install.mcr=
@@ -3614,7 +3617,7 @@ global _rGCAutoGLBConverter_Settings = undefined
 global _rGCAutoGLBConverter_About = undefined
 
 try(closeRolloutFloater _fGCAutoGLBConverter) catch()
-global _fGCAutoGLBConverter = newRolloutFloater "" 300 460
+global _fGCAutoGLBConverter = newRolloutFloater "" 300 415
 
 
 fn getLogginFile = (
@@ -3700,14 +3703,14 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		checkbutton cbxModeTest "Testing" highlightColor: (color 186 169 55) width: 122
 	)
 
-	group "Additional Conversion" (
-		checkbox cbxConvertToBlend "Convert to BLEND"
-		checkbox cbxConvertToSketchup "Convert to SKP"
+	group "Additional Conversion Formats" (
+		checkbox cbxConvertToBlend "BLEND" across: 2
+		checkbox cbxConvertToSketchup "SKP"
 	)
 
 	group "Settings" (
-		checkbox cbxBakeCoronaAO "Bake Corona AO"
-		checkbox cbxRunListenerErrorObserver "Run Listener Error Observer"
+		checkbox cbxBakeCoronaAO "Bake Corona AO" across: 2
+		checkbox cbxRunListenerErrorObserver "Observe Listener Error"
 	)
 
 	progressBar pbProgress "" height: 9 color: (color 52 168 83) value: 0 offset: [0, 5]
