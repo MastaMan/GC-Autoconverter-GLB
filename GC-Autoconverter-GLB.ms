@@ -72,6 +72,7 @@ denoise.bat=
 gltfpack.bat=
 vdenoise.xml=
 normalmap.exe=
+uvatlastool.exe=
 xnormal.bat=deleted
 xnormal.xml=deleted
 lowes-viewer.zip=deleted
@@ -1231,7 +1232,8 @@ struct watchdogWrapper (
 			(findString stage "bake_xnormal_ao") != undefined or
 			(findString stage "create_ao_map") != undefined or
 			(findString stage "set_ao_map") != undefined or
-			(findString stage "denoise_ao") != undefined
+			(findString stage "denoise_ao") != undefined or
+			(findString stage "uvatlas_") != undefined
 		)
 	),
 
@@ -2089,6 +2091,261 @@ struct WebGLPlayerWrapper (
 
 	fn run = (
 		startWebServer()
+	)
+)
+
+struct UVAtlasToolWrapper (
+	currentPath = getFilenamePath (getThisScriptFilename()),
+	exe = currentPath + "uvatlastool.exe",
+	lastError = "",
+
+	fn setError message = (
+		lastError = message as string
+		return false
+	),
+
+	fn getLastError = (
+		return lastError
+	),
+
+	fn isAvailable = (
+		return (doesFileExist this.exe)
+	),
+
+	fn makeTempPath filename = (
+		local tempDir = getDir #temp
+		if ((substring tempDir tempDir.count 1) != @"\") do tempDir += @"\"
+		local workDir = tempDir + @"GC-Autoconverter-GLB-UVAtlas\"
+		makeDir workDir all: true
+		return workDir + filename
+	),
+
+	fn cleanupFiles files = (
+		for file in files where file != undefined and file != "" do (
+			try (if (doesFileExist file) do deleteFile file) catch()
+		)
+		return true
+	),
+
+	fn cleanupNodes nodes = (
+		for node in nodes where node != undefined and isValidNode node do (
+			try (delete node) catch()
+		)
+		return true
+	),
+
+	fn readTextFile file = (
+		if (file == undefined or file == "" or not doesFileExist file) do return ""
+
+		local inputStream = openFile file mode: "rt"
+		if (inputStream == undefined) do return ""
+
+		local result = ""
+		while (not eof inputStream) do (
+			local line = readLine inputStream
+			if (line != undefined) do result += line + "\n"
+		)
+
+		close inputStream
+		return result
+	),
+
+	fn writeTextFile file text = (
+		local outputStream = createFile file
+		if (outputStream == undefined) do return false
+		format "%" text to: outputStream
+		close outputStream
+		return true
+	),
+
+	fn run inputFile outputFile resolution logFile: "" = (
+		lastError = ""
+		if (not this.isAvailable()) do return (this.setError ("uvatlastool.exe not found: " + this.exe))
+		if (not doesFileExist inputFile) do return (this.setError ("Input OBJ file does not exist: " + inputFile))
+
+		local textureSize = resolution as integer
+		if (textureSize < 1) do textureSize = 1024
+
+		if (logFile == "") do logFile = this.makeTempPath ("uvatlas_" + (timeStamp() as string) + ".log")
+		local batFile = this.makeTempPath ("uvatlas_" + (timeStamp() as string) + ".bat")
+		local command = "\"" + this.exe + "\" -ft obj -q FAST -w " + (textureSize as string) + " -h " + (textureSize as string) + " -g 2 -y -nologo -o \"" + outputFile + "\" -- \"" + inputFile + "\" > \"" + logFile + "\" 2>&1"
+		local batText = "@echo off\n" + command + "\n"
+		if (not this.writeTextFile batFile batText) do return (this.setError ("Cannot write UVAtlas command file: " + batFile))
+
+		local exitCode = 0
+		hiddenDosCommand ("\"" + batFile + "\"") exitCode: &exitCode donotwait: false
+		local commandOutput = this.readTextFile logFile
+		this.cleanupFiles #(batFile)
+
+		if (exitCode != 0) do return (this.setError ("UVAtlas command failed. Exit code: " + (exitCode as string) + "\n\nCommand output:\n" + commandOutput))
+		if (not doesFileExist outputFile) do return (this.setError ("UVAtlas output OBJ was not created: " + outputFile + "\n\nCommand output:\n" + commandOutput))
+		return true
+	),
+
+	fn exportObjectToObj obj outputFile = (
+		if (obj == undefined or not isValidNode obj) do (
+			this.setError "Cannot export invalid object to OBJ."
+			return undefined
+		)
+
+		local sourceClone = undefined
+		try (
+			sourceClone = snapshot obj
+			sourceClone.name = "__uvatlas_export_" + (timeStamp() as string)
+			convertToMesh sourceClone
+			select sourceClone
+			exportFile outputFile #noPrompt selectedOnly: true
+		) catch (
+			this.cleanupNodes #(sourceClone)
+			this.setError ("OBJ export failed for object: " + obj.name)
+			return undefined
+		)
+
+		this.cleanupNodes #(sourceClone)
+		if (doesFileExist outputFile) then (
+			return outputFile
+		) else (
+			this.setError ("OBJ export did not create file: " + outputFile)
+			return undefined
+		)
+	),
+
+	fn parseObjFaceVertex token = (
+		local parts = filterString token "/"
+		if (parts.count < 2) do return 0
+		local mapVertIndex = try (parts[2] as integer) catch (0)
+		return mapVertIndex
+	),
+
+	fn parseUVsFromObj objFile = (
+		local mapVerts = #()
+		local mapFaces = #()
+
+		if (not doesFileExist objFile) do (
+			this.setError ("Cannot parse missing OBJ file: " + objFile)
+			return #(#(), #())
+		)
+
+		local inputStream = openFile objFile mode: "rt"
+		if (inputStream == undefined) do (
+			this.setError ("Cannot open OBJ file: " + objFile)
+			return #(#(), #())
+		)
+
+		while (not eof inputStream) do (
+			local line = readLine inputStream
+			if (line != undefined) do (
+				line = trimLeft (trimRight line)
+				if (line.count >= 3 and (substring line 1 3) == "vt ") do (
+					local parts = filterString line " \t"
+					if (parts.count >= 3) do (
+						local u = try (parts[2] as float) catch (0.0)
+						local v = try (parts[3] as float) catch (0.0)
+						append mapVerts [u, v, 0]
+					)
+				)
+
+				if (line.count >= 2 and (substring line 1 2) == "f ") do (
+					local parts = filterString line " \t"
+					if (parts.count >= 4) do (
+						local firstMapVert = this.parseObjFaceVertex parts[2]
+						for faceTokenIndex in 3 to (parts.count - 1) do (
+							local secondMapVert = this.parseObjFaceVertex parts[faceTokenIndex]
+							local thirdMapVert = this.parseObjFaceVertex parts[faceTokenIndex + 1]
+							if (firstMapVert > 0 and secondMapVert > 0 and thirdMapVert > 0) do (
+								append mapFaces [firstMapVert, secondMapVert, thirdMapVert]
+							)
+						)
+					)
+				)
+			)
+		)
+
+		close inputStream
+		return #(mapVerts, mapFaces)
+	),
+
+	fn applyObjUVsToMapChannel targetObj objFile targetChannel: 2 = (
+		if (targetObj == undefined or not isValidNode targetObj) do return (this.setError "Cannot apply UVs to invalid target object.")
+
+		try (convertToMesh targetObj) catch()
+
+		local targetMesh = targetObj.mesh
+		local targetFaces = try (meshop.getNumFaces targetMesh) catch (0)
+		if (targetFaces < 1) do return (this.setError ("Target object has no mesh faces: " + targetObj.name))
+
+		local parsedData = this.parseUVsFromObj objFile
+		local mapVerts = parsedData[1]
+		local mapFaces = parsedData[2]
+
+		if (mapVerts.count < 1) do return (this.setError "UVAtlas output OBJ has no texture vertices.")
+		if (mapFaces.count != targetFaces) do return (this.setError ("UVAtlas output face count does not match target object. Output faces: " + (mapFaces.count as string) + ", target faces: " + (targetFaces as string)))
+
+		local requiredMapCount = targetChannel + 1
+		try (
+			local currentMapCount = meshop.getNumMaps targetMesh
+			if (currentMapCount < requiredMapCount) do meshop.setNumMaps targetMesh requiredMapCount keep: true
+		) catch (
+			try (meshop.setNumMaps targetMesh requiredMapCount true) catch()
+		)
+
+		try (meshop.setMapSupport targetMesh targetChannel true) catch (return (this.setError ("Cannot enable map channel " + (targetChannel as string))))
+		try (meshop.setNumMapVerts targetMesh targetChannel mapVerts.count) catch (return (this.setError ("Cannot set map verts for channel " + (targetChannel as string))))
+		try (meshop.setNumMapFaces targetMesh targetChannel mapFaces.count) catch (return (this.setError ("Cannot set map faces for channel " + (targetChannel as string))))
+
+		for mapVertIndex in 1 to mapVerts.count do (
+			meshop.setMapVert targetMesh targetChannel mapVertIndex mapVerts[mapVertIndex]
+		)
+
+		for mapFaceIndex in 1 to mapFaces.count do (
+			meshop.setMapFace targetMesh targetChannel mapFaceIndex mapFaces[mapFaceIndex]
+		)
+
+		try (targetObj.mesh = targetMesh) catch()
+		try (update targetObj) catch()
+		return true
+	),
+
+	fn unwrap obj resolution: 1024 targetChannel: 2 = (
+		if (obj == undefined or not isValidNode obj) do return false
+		if (not this.isAvailable()) do return false
+
+		local previousSelection = selection as array
+		local uid = (timeStamp() as string) + "_" + ((random 1000 9999) as string)
+		local inputObj = this.makeTempPath ("uvatlas_in_" + uid + ".obj")
+		local inputMtl = this.makeTempPath ("uvatlas_in_" + uid + ".mtl")
+		local outputObj = this.makeTempPath ("uvatlas_out_" + uid + ".obj")
+		local outputMtl = this.makeTempPath ("uvatlas_out_" + uid + ".mtl")
+		local outputLog = this.makeTempPath ("uvatlas_out_" + uid + ".log")
+		local importedObj = undefined
+		local isUnwrapped = false
+		lastError = ""
+
+		try (
+			try (watchdogMgr.beat stage: ("uvatlas_export:" + obj.name)) catch()
+			local exportedFile = this.exportObjectToObj obj inputObj
+			if (exportedFile != undefined) do (
+				try (watchdogMgr.beat stage: ("uvatlas_run:" + obj.name)) catch()
+				local isProcessed = this.run inputObj outputObj resolution logFile: outputLog
+				if (isProcessed == true) do (
+					try (watchdogMgr.beat stage: ("uvatlas_copy_uv:" + obj.name)) catch()
+					isUnwrapped = this.applyObjUVsToMapChannel obj outputObj targetChannel: targetChannel
+				)
+			)
+		) catch (
+			isUnwrapped = false
+			if (lastError == "") do lastError = "Unexpected UVAtlas unwrap error."
+		)
+
+		this.cleanupNodes #(importedObj)
+		this.cleanupFiles #(inputObj, inputMtl, outputObj, outputMtl, outputLog)
+		try (select previousSelection) catch()
+
+		if (isUnwrapped == true) then (
+			return true
+		) else (
+			return false
+		)
 	)
 )
 
@@ -3000,7 +3257,13 @@ struct BatchGLBConverterWrapper (
 		::CoronaConverterSuppressGui = false
 	),
 
-	fn autoUnwrap obj = (
+	fn getAOUnwrapMethod = (
+		local method = '*'.get "aoUnwrapMethod"
+		if (method != "uvatlas") do method = "max"
+		return method
+	),
+
+	fn autoUnwrapWithMax obj = (
 		try (watchdogMgr.beat stage: ("auto_unwrap:" + obj.name)) catch()
 		with redraw off with undo off (
 			select obj
@@ -3024,6 +3287,35 @@ struct BatchGLBConverterWrapper (
 			max select none
 			subobjectLevel = 0
 			convertToMesh obj
+		)
+
+		return true
+	),
+
+	fn autoUnwrapWithUVAtlas obj ao: undefined = (
+		if (ao == undefined) do return false
+
+		local uvAtlas = UVAtlasToolWrapper()
+		if (not uvAtlas.isAvailable()) do (
+			print "[Warning] UVAtlas Tool unwrap is selected, but uvatlastool.exe was not found. AO baking will be skipped for this object."
+			return false
+		)
+
+		local isUnwrapped = uvAtlas.unwrap obj resolution: ao.resolution targetChannel: 2
+		if (isUnwrapped != true) do (
+			print ("[Warning] UVAtlas Tool unwrap failed for object: " + obj.name + ". AO baking will be skipped for this object.")
+			return false
+		)
+
+		return true
+	),
+
+	fn autoUnwrap obj ao: undefined = (
+		local method = this.getAOUnwrapMethod()
+		if (method == "uvatlas") then (
+			return (this.autoUnwrapWithUVAtlas obj ao: ao)
+		) else (
+			return (this.autoUnwrapWithMax obj)
 		)
 	),
 
@@ -3255,6 +3547,8 @@ struct BatchGLBConverterWrapper (
 		try (watchdogMgr.beat stage: "create_ao_map") catch()
 		max unhide all
 		local oo = geometry as array
+		local unwrapMethod = this.getAOUnwrapMethod()
+		print ("AO unwrap method: " + unwrapMethod)
 		local aoIndex = 0
 		for o in oo where this.isValidObject o do (
 			aoIndex += 1
@@ -3264,16 +3558,19 @@ struct BatchGLBConverterWrapper (
 			o.material.name = n
 
 			local f = this.generateCacheFilename()
+			local isUnwrapped = this.autoUnwrap o ao: ao
+			if (isUnwrapped != true) then (
+				print ("[Warning] AO baking skipped because unwrap failed for object: " + o.name)
+			) else (
+				if (ao.type == #corona) do (
+					this.bakeCoronaAO o f ao: ao
+					this.setAOmap o f
+				)
 
-			this.autoUnwrap o
-			if (ao.type == #corona) do (
-				this.bakeCoronaAO o f ao: ao
-				this.setAOmap o f
-			)
-
-			if (ao.type == #xnormal) do (
-				this.bakeXNormalAO o f ao: ao
-				this.setAOmap o f
+				if (ao.type == #xnormal) do (
+					this.bakeXNormalAO o f ao: ao
+					this.setAOmap o f
+				)
 			)
 		)
 	),
@@ -3607,6 +3904,10 @@ struct BatchGLBConverterWrapper (
 		for i in getClassInstances MeshSmooth do i.isolineDisplay = false
 		for i in getClassInstances TurboSmooth do i.isolineDisplay = false
 	),
+	
+	fn deleteSpheres = (
+		for o in objects where classOf o == Sphere and isValidNode o and not isDeleted o do try (delete o) catch ()
+	),
 
 	fn load f = (
 		sleep 0.1
@@ -3661,6 +3962,7 @@ struct BatchGLBConverterWrapper (
 
 		max tool zoomextents
 		max tool maximize
+		deleteSpheres()
 		unfreezeAll()
 		unhideAll()
 		enableBackFaceCull()
@@ -4440,7 +4742,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		return glb
 	)
-
+	
 	/* PROCESS FILES */
 	fn processFiles = (
 		resetProcessTelegramLogs()
@@ -4598,7 +4900,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local splitByLayers = layerNames.count > 1
 		local sourceSceneFile = maxFilePath + maxFileName
 		local sourceDeleteDir = r.del
-
+		
 		if (splitByLayers and doesFileExist sourceSceneFile) then (
 			try (watchdogMgr.beat stage: "checking_layers") catch()
 			postProcessLog ("Scene has " + (layerNames.count as string) + " layers with objects. Converting each layer separately.")
@@ -5141,6 +5443,10 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 		checkbox cbxAODenoise "Use VRay Denoiser" offset: [15, 0]
 	)
 
+	group "AO Unwrap Method" (
+		radiobuttons rdoAOUnwrapMethod labels: #("3ds Max Unwrap", "UVAtlas Tool") columns: 2 default: 1
+	)
+
 	group "Watchdog Settings" (
 		spinner spnWatchdogTimeoutMin "Stuck timeout (min):" range: [1, 999, 15] type: #integer fieldwidth: 50 align: #right
 	)
@@ -5156,6 +5462,8 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 		spnAOResolution.value = if (r != 0) then r else 1024
 
 		cbxAODenoise.checked = '*'.get "cbxAODenoise" type: #bool_false
+		local unwrapMethod = '*'.get "aoUnwrapMethod"
+		rdoAOUnwrapMethod.state = if (unwrapMethod == "uvatlas") then 2 else 1
 
 		spnWatchdogTimeoutMin.value = watchdogMgr.getTimeoutMin()
 		watchdogMgr.saveTimeout()
@@ -5166,6 +5474,10 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 	on spnAOSize changed v do '*'.add  "spnAOSize" v
 	on spnAOResolution changed v do '*'.add  "spnAOResolution" v
 	on cbxAODenoise changed v do '*'.add  "cbxAODenoise" v
+	on rdoAOUnwrapMethod changed state do (
+		local unwrapMethod = if (state == 2) then "uvatlas" else "max"
+		'*'.add "aoUnwrapMethod" unwrapMethod
+	)
 	on spnWatchdogTimeoutMin changed v do (
 		setIniSetting watchdogMgr.settingsIni watchdogMgr.settingsSec "spnWatchdogTimeoutMin" (v as string)
 		watchdogMgr.saveTimeout()
