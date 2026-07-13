@@ -1,0 +1,102 @@
+# Coding Rules
+
+These rules describe how we write and maintain MaxScript code in this project.
+
+## MaxScript Functions
+
+- Always use an explicit `return` when a function produces a result.
+- Do not leave a "lonely" variable or expression as the last line of a function and rely on it as an implicit return value.
+- Return `true` or `false` explicitly from functions that report success/failure.
+- Use early `return` for guard clauses when it makes the function easier to read.
+
+Example:
+
+```maxscript
+fn isValidFile f = (
+	if (f == undefined or f == "") do return false
+	if (not doesFileExist f) do return false
+	return true
+)
+```
+
+## Variables
+
+- Use `local` for internal function variables.
+- Do not leak temporary variables into global scope.
+- Use descriptive names that explain intent.
+- Do not use reserved or ambiguous names such as `ok`, because some names can conflict with MaxScript reserved values or built-in behavior.
+- Prefer names such as `isSuccess`, `isValid`, `hasError`, `uploadResult`, `errorMessage`, `responseBody`.
+
+Example:
+
+```maxscript
+local isUploaded = awsUploaderMgr.upload file
+if (isUploaded) then (
+	return true
+) else (
+	return false
+)
+```
+
+## Error Handling
+
+- Wrap optional, debug, watchdog, UI, and external integration calls in `try/catch` when failure should not stop the conversion.
+- Do not hide important processing errors that must stop the current queue item.
+- If an error should be visible to the server, send it through `requestMgr.postLog` or the existing process logging helper.
+- If a function catches an error and continues, make sure the fallback behavior is intentional.
+
+Example:
+
+```maxscript
+try (watchdogMgr.beat stage: "converting_glb") catch()
+```
+
+## Scope And State
+
+- Keep globals limited to shared managers, UI rollout references, and configuration that truly needs to be shared.
+- Prefer passing values into functions instead of reading unrelated global state inside helpers.
+- Do not mutate UI checkbox/settings values just to change one processing attempt. Use a local runtime flag instead.
+- Keep runtime state files such as `watchdog.ini` out of git and out of `[FILES]`.
+
+## Logging
+
+- Use clear present-tense or past-tense messages:
+	- `Converting to GLB...`
+	- `GLB conversion finished.`
+	- `Uploading file to S3...`
+	- `Upload failed: ...`
+- Avoid vague debug text such as repeated symbols or temporary placeholders.
+- Log important decisions, for example when AO baking is disabled after a watchdog timeout.
+
+## JSON And API Payloads
+
+- Use the project JSON builder instead of manual string concatenation for API payloads.
+- The JSON builder must support strings, booleans, integers, integer64 values, floats, arrays, and nested data.
+- Escape strings correctly before sending them to the API.
+- Use explicit field names that match backend expectations.
+
+## Files And Paths
+
+- Use local helper wrappers for downloads, uploads, archives, and conversion steps.
+- Check that required files exist before using them.
+- Do not assume external tools are available in `System32`; prefer project-local executables when the project ships them.
+- Temporary files created for curl, Telegram, S3, or tests must be deleted after use when possible.
+
+## UI
+
+- Keep UI state and runtime processing state separate.
+- If a setting is saved from UI, use the existing settings pattern for that rollout.
+- When adding a new setting, provide a safe default and load it on startup.
+- Error messages shown to the user should explain what is missing or what failed.
+
+## Git And Release Hygiene
+
+- Do not commit credentials, local settings, generated runtime files, or test-only local data.
+- Before release, run:
+
+```powershell
+git -c safe.directory=C:/Projects/Scripts/GC-Autoconverter-GLB diff --check
+rg -n --glob "*.bat" --glob "GC-Autoconverter-GLB.ms" -- "AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|aws_secret_access_key|aws_access_key_id|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|secretAccessKey|accessKeyId"
+```
+
+- Follow `release.md` for version bumps, changelog updates, commits, and pushes.
