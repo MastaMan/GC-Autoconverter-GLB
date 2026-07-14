@@ -38,6 +38,19 @@ if (isUploaded) then (
 )
 ```
 
+## Loops
+
+- Use `for i in 1 to count do (...)` style for numeric ranges.
+- Do not use `for i = 1 to count do (...)` in project MaxScript code.
+
+Example:
+
+```maxscript
+for i in 1 to items.count do (
+	print items[i]
+)
+```
+
 ## Error Handling
 
 - Wrap optional, debug, watchdog, UI, and external integration calls in `try/catch` when failure should not stop the conversion.

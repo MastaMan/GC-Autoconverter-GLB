@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.6
+VERSION=1.1.7
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -84,6 +84,11 @@ Auto Converter to GLB/SKP/BLEND script=
 + Improved: MeshSmooth and TurboSmooth are prepared before automatic scene collapse and attach operations=
 + Added: Configurable 3ds Max AO unwrap polygon limit=
 + Improved: Server logs now report skipped AO baking when the 3ds Max unwrap polygon limit is exceeded=
+
+[1.1.7]
++ Improved: Sphere cleanup now removes collapsed sphere-like helper objects by topology=
++ Improved: Sphere cleanup also runs for directly loaded MAX files=
++ Added: Coding rule for numeric range loops without equals sign=
 
 [FILES]
 Install.mcr=
@@ -246,7 +251,7 @@ struct JsonWrapper (
 
 	fn repeatText txt count = (
 		local result = ""
-		for i = 1 to count do result += txt
+		for i in 1 to count do result += txt
 		return result
 	),
 
@@ -414,7 +419,7 @@ struct JsonReaderWrapper (
 		local escaped = false
 		local ch = ""
 
-		for i = 1 to json.count do (
+		for i in 1 to json.count do (
 			ch = substring json i 1
 
 			if (escaped) then (
@@ -452,7 +457,7 @@ struct JsonReaderWrapper (
 		local keyText = ""
 		local valueText = ""
 
-		for i = 1 to pairText.count do (
+		for i in 1 to pairText.count do (
 			ch = substring pairText i 1
 
 			if (escaped) then (
@@ -4070,7 +4075,58 @@ struct BatchGLBConverterWrapper (
 	),
 	
 	fn deleteSpheres = (
-		for o in objects where classOf o == Sphere and isValidNode o and not isDeleted o do try (delete o) catch ()
+		fn isCollapsedSphereByTopology o = (
+			if (o == undefined or not isValidNode o or isDeleted o) do return false
+			if (not (canConvertTo o Editable_mesh)) do return false
+
+			local meshValue = undefined
+			local isSphereTopology = false
+
+			try (
+				meshValue = snapshotAsMesh o
+				local vertsCount = getNumVerts meshValue
+				if (vertsCount >= 470 and vertsCount <= 490) do (
+					local facesCount = getNumFaces meshValue
+					local vertFaceCounts = for i in 1 to vertsCount collect 0
+					local maxFaceCount = 0
+					local poleVertsCount = 0
+
+					for faceIndex in 1 to facesCount do (
+						local faceVerts = getFace meshValue faceIndex
+						local indices = #(faceVerts.x as integer, faceVerts.y as integer, faceVerts.z as integer)
+
+						for vertIndex in indices where vertIndex >= 1 and vertIndex <= vertsCount do (
+							vertFaceCounts[vertIndex] += 1
+						)
+					)
+
+					for faceCount in vertFaceCounts do (
+						if (faceCount > maxFaceCount) do maxFaceCount = faceCount
+						if (faceCount >= 32) do poleVertsCount += 1
+					)
+
+					isSphereTopology = (maxFaceCount >= 32 and poleVertsCount >= 2)
+				)
+			) catch (
+				isSphereTopology = false
+			)
+
+			meshValue = undefined
+			return isSphereTopology
+		)
+
+		local toDelete = #()
+		for o in objects where isValidNode o and not isDeleted o do (
+			local shouldDelete = (classOf o == Sphere)
+			if (not shouldDelete) do shouldDelete = isCollapsedSphereByTopology o
+
+			if (shouldDelete) do appendIfUnique toDelete o
+		)
+
+		try (delete toDelete) catch ()
+
+		if (toDelete.count > 0) do print ("Deleted sphere-like helper objects: " + (toDelete.count as string))
+		return toDelete.count
 	),
 
 	fn run out: "" scn: undefined ao: undefined isNormalizeTiling: false = (
@@ -4313,6 +4369,7 @@ struct BatchGLBConverterWrapper (
 			r.type = #max
 			r.opened = maxFileName == nn
 			r.maxName = nn
+			if (r.opened) do deleteSpheres()
 
 			return r
 		)
