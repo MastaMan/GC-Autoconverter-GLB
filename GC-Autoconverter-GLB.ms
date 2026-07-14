@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.2
+VERSION=1.1.3
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -68,6 +68,12 @@ Auto Converter to GLB/SKP/BLEND script=
 + Added: Blender unwrap island repacking option=
 - Deleted: uvatlastool.exe from production file inventory=
 
+[1.1.3]
++ Improved: Watchdog disables QuickEdit and moves its console to the lower-right screen corner=
++ Improved: Watchdog displays AID above Model ID=
++ Improved: Telegram processing reports include AID above Model ID=
+- BugFix: Debug Convert Current Scene returns to the source scene after conversion=
+
 [FILES]
 Install.mcr=
 jpegoptim.exe=
@@ -133,7 +139,7 @@ struct listenerObserverWrapper (
 		try (fileIn script) catch (print "Can't run Listener Observer service!")
 	),
 	fn destroy = (
-		try (DestroyDialog listenerObserver) catch ()
+		try (DestroyDialog ::listenerObserver) catch ()
 	)
 )
 
@@ -2454,7 +2460,7 @@ struct BlenderUnwrapWrapper (
 		)
 	),
 
-	fn run inputFile outputFile resolution unwrapMethod: "smart_project" angleLimit: 66.6 islandMargin: 0.02 packIslands: true logFile: "" = (
+	fn run inputFile outputFile resolution unwrapMethod: "smart_project" angleLimit: 66.6 islandMargin: 0.0 packIslands: true logFile: "" = (
 		lastError = ""
 
 		local blenderExe = this.getBlenderExe()
@@ -4831,6 +4837,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		txt += "Mode: " + modeLabel + "\n"
 		txt += "Slug: " + slug + "\n"
 		txt += "Original file: " + sourceName + "\n"
+		txt += "AID: " + (requestMgr.a_id as string) + "\n"
 		txt += "Model ID: " + (requestMgr.model_id as string) + "\n"
 		txt += "Version ID: " + (requestMgr.version_id as string) + "\n"
 		txt += "Expected files: " + (expectedExitFiles.count as string) + "\n"
@@ -5347,7 +5354,15 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	on cbxBakeCoronaAO changed v do '*'.add "cbxBakeCoronaAO" v
 	on cbxConvertToBlend changed v do '*'.add "cbxConvertToBlend" v
 	on cbxConvertToSketchup changed v do '*'.add "cbxConvertToSketchup" v
-	on cbxRunListenerErrorObserver changed v do '*'.add "cbxRunListenerErrorObserver" v
+	on cbxRunListenerErrorObserver changed v do (
+		'*'.add "cbxRunListenerErrorObserver" v
+
+		if (v) then (
+			(listenerObserverWrapper()).run()
+		) else (
+			(listenerObserverWrapper()).destroy()
+		)
+	)
 
 	on btnStartStartupProcess changed v do (
 		local errors = #()
@@ -5859,6 +5874,19 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 		)
 	)
 
+	fn restoreDebugSourceScene sourceSceneFile = (
+		if (sourceSceneFile == undefined or sourceSceneFile == "" or not doesFileExist sourceSceneFile) do return false
+
+		debugLog ("Returning to source scene: " + sourceSceneFile)
+		try (
+			loadMaxFile sourceSceneFile quiet: true
+			::_rGCAutoGLBConverter_Main.resetLoadedSceneState()
+			return true
+		) catch (
+			return false
+		)
+	)
+
 	fn rememberLastDebugGLB expectedExitFiles = (
 		for f in expectedExitFiles where (toLower (getFilenameType f) == ".glb" and doesFileExist f) do (
 			'*'.add "debugLastGLB" f
@@ -5904,6 +5932,7 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 			return false
 		)
 
+		local sourceSceneFile = maxFilePath + maxFileName
 		local sceneName = getFilenameFile maxFileName
 		local d = getOutputPath()
 		if (d == "") do (
@@ -5919,15 +5948,23 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 		local expectedExitFiles = #()
 		local convertedSceneFiles = #()
 
+		debugLog ("Saving source scene before debug conversion: " + sourceSceneFile)
+		if (not (saveConvertedCompareScene sourceSceneFile)) do (
+			messageBox "Cannot save source scene before debug conversion." title: "Debug"
+			return false
+		)
+
 		debugLog ("Saving original compare scene: " + originalSceneFile)
 		if (not (saveConvertedCompareScene originalSceneFile)) do (
 			messageBox "Cannot save original compare scene." title: "Debug"
+			restoreDebugSourceScene sourceSceneFile
 			return false
 		)
 
 		try (deleteFile workingSceneFile) catch ()
 		if (not (copyFile originalSceneFile workingSceneFile)) do (
 			messageBox "Cannot create debug working scene copy." title: "Debug"
+			restoreDebugSourceScene sourceSceneFile
 			return false
 		)
 
@@ -5944,6 +5981,7 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 		local r = ::API_BATCH_GLB_CONVERTER.load workingSceneFile
 		if (not r.opened) do (
 			SetQuietMode false
+			restoreDebugSourceScene sourceSceneFile
 			messageBox "Cannot open debug working scene." title: "Debug"
 			return false
 		)
@@ -5962,6 +6000,7 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 			if (failedLayerStats.count > 0) do (
 				local m = "Layer polygon limit exceeded. Limit per layer: " + (_MAX_ALLOWED_POLYS as string) + ". Failed layers: " + (::_rGCAutoGLBConverter_Main.formatPolyStatsList failedLayerStats) + "."
 				SetQuietMode false
+				restoreDebugSourceScene sourceSceneFile
 				messageBox m title: "Debug"
 				return false
 			)
@@ -5996,6 +6035,7 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 			if (sceneStat[2] > _MAX_ALLOWED_POLYS) do (
 				local m = "The polygon count exceeds the allowed limit. Limit: " + (_MAX_ALLOWED_POLYS as string) + ". Scene polygons: " + (sceneStat[2] as string) + "."
 				SetQuietMode false
+				restoreDebugSourceScene sourceSceneFile
 				messageBox m title: "Debug"
 				return false
 			)
@@ -6012,6 +6052,12 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 		if (convertedSceneFiles.count > 1) do m += "\n\nLayer compare scenes: " + (convertedSceneFiles.count as string)
 
 		SetQuietMode false
+		local isSourceSceneRestored = restoreDebugSourceScene sourceSceneFile
+		if (isSourceSceneRestored) then (
+			m += "\n\nReturned to source scene:\n" + sourceSceneFile
+		) else (
+			m += "\n\nWarning: could not return to source scene:\n" + sourceSceneFile
+		)
 		debugLog "Debug conversion finished."
 		messageBox m title: "Debug"
 		return true

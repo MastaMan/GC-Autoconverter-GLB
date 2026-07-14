@@ -3,6 +3,13 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 title 3ds Max Watchdog
 
+call :setup_watchdog_window
+if errorlevel 1 (
+	echo Watchdog console setup failed. Continuing...
+) else (
+	echo QuickEdit disabled. Watchdog window moved.
+)
+
 set "WATCHDOG_INI=%~dp0watchdog.ini"
 set "SETTINGS_INI=%~dp0global@settings.ini"
 set "SETTINGS_SEC=GC-Autoconverter-GLB"
@@ -243,7 +250,8 @@ echo Attempt stage:   !ATTEMPT_STAGE!
 echo Last timeout:    !LAST_TIMEOUT_AT!
 echo.
 if defined SLUG (
-	echo a_id ^| slug:     !A_ID! ^| !SLUG!
+	echo AID:             !A_ID!
+	echo Model ID:        !SLUG!
 	echo stage:           !STAGE!
 	echo startedAt:       !STARTED_AT!
 	echo heartbeatAt:     !HEARTBEAT_AT!
@@ -252,7 +260,8 @@ if defined SLUG (
 	echo elapsed:         !DISPLAY_ELAPSED! sec since heartbeat
 	echo restart in:      !DISPLAY_REMAINING_MIN! min !DISPLAY_REMAINING_SEC! sec
 ) else (
-	echo a_id ^| slug:     no active file
+	echo AID:             -
+	echo Model ID:        no active file
 	echo stage:           -
 	echo startedAt:       -
 	echo heartbeatAt:     -
@@ -260,3 +269,7 @@ if defined SLUG (
 	echo restart in:      no active file
 )
 exit /b 0
+
+:setup_watchdog_window
+powershell -NoP -ExecutionPolicy Bypass -Command "try { Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class W { [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; } [DllImport(""kernel32.dll"")] public static extern IntPtr GetStdHandle(int nStdHandle); [DllImport(""kernel32.dll"")] public static extern IntPtr GetConsoleWindow(); [DllImport(""kernel32.dll"")] public static extern bool GetConsoleMode(IntPtr hConsoleHandle, ref int lpMode); [DllImport(""kernel32.dll"")] public static extern bool SetConsoleMode(IntPtr hConsoleHandle, int dwMode); [DllImport(""user32.dll"")] public static extern bool GetWindowRect(IntPtr hWnd, ref RECT lpRect); [DllImport(""user32.dll"")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint); [DllImport(""user32.dll"")] public static extern bool SystemParametersInfo(int uiAction, int uiParam, ref RECT pvParam, int fWinIni); }'; $stdin=[W]::GetStdHandle(-10); $mode=0; if ([W]::GetConsoleMode($stdin, [ref]$mode)) { $mode=($mode -bor 128) -band (-bnot 64) -band (-bnot 32); [void][W]::SetConsoleMode($stdin, $mode) }; $hwnd=[W]::GetConsoleWindow(); if ($hwnd -ne [IntPtr]::Zero) { $rect=New-Object W+RECT; $work=New-Object W+RECT; [void][W]::GetWindowRect($hwnd, [ref]$rect); [void][W]::SystemParametersInfo(48, 0, [ref]$work, 0); $width=$rect.Right-$rect.Left; $height=$rect.Bottom-$rect.Top; $x=$work.Right-$width-20; $y=$work.Bottom-$height-20; if ($x -lt $work.Left) { $x=$work.Left }; if ($y -lt $work.Top) { $y=$work.Top }; [void][W]::MoveWindow($hwnd, $x, $y, $width, $height, $true) }; exit 0 } catch { exit 1 }" >nul 2>nul
+exit /b %ERRORLEVEL%
