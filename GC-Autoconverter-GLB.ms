@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.10
+VERSION=1.2.0
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -100,7 +100,7 @@ Auto Converter to GLB/SKP/BLEND script=
 + Improved: GLTF material conversion preserves more glass absorption color and roughness detail=
 + BugFix: 3ds Max restart uses the current script path when launching restart.bat=
 
-[1.1.10]
+[1.2.0]
 + Improved: S3 uploads now use the results/ bucket prefix=
 + Improved: Upload logs and result_json now report S3 object keys with the results/ prefix=
 
