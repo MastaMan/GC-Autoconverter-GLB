@@ -3119,12 +3119,13 @@ struct BatchGLBConverterWrapper (
 		local a = #()
 		for i in getClassInstances MeshSmooth do appendIfUnique a i
 		for i in getClassInstances TurboSmooth do appendIfUnique a i
-
+		
 		for i in a do (
 			if (i.renderIterations > i.iterations) do i.iterations = i.renderIterations
+			if (i.iterations > 2) do i.iterations = 2
 			try (i.isolineDisplay = false) catch ()
 		)
-	),
+	)
 
 	fn neutralizeRaySwitch = (
 		for i in getClassInstances CoronaRaySwitchMtl do (
@@ -4007,6 +4008,10 @@ struct BatchGLBConverterWrapper (
 
 		return cc
 	),
+	
+	fn deleteSpheres = (
+		for o in objects where classOf o == Sphere and isValidNode o and not isDeleted o do try (delete o) catch ()
+	),
 
 	fn run out: "" scn: undefined ao: undefined isNormalizeTiling: false = (
 		this.json = #()
@@ -4221,9 +4226,6 @@ struct BatchGLBConverterWrapper (
 		for i in getClassInstances TurboSmooth do i.isolineDisplay = false
 	),
 	
-	fn deleteSpheres = (
-		for o in objects where classOf o == Sphere and isValidNode o and not isDeleted o do try (delete o) catch ()
-	),
 
 	fn load f = (
 		sleep 0.1
