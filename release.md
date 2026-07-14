@@ -4,6 +4,24 @@ This project currently releases by updating the script version, committing to
 `main`, and pushing to `origin/main`. Git tags are not used in the existing
 history.
 
+## Version Selection
+
+Before changing `VERSION`, decide the release number intentionally.
+
+- If the user explicitly names a version, use that exact version.
+- If the user corrects the version after a release, make a follow-up release
+  commit with the corrected version unless they explicitly ask to rewrite
+  history.
+- Do not mechanically increment the last patch number just because the previous
+  release used that pattern.
+- Use a patch release, for example `1.1.9` -> `1.1.10`, for small fixes and
+  internal improvements.
+- Use a minor release, for example `1.1.9` -> `1.2.0`, when behavior changes
+  how external systems consume output, API payloads, S3 object paths, file
+  naming, or other integration contracts.
+- When unsure whether the change is patch or minor, stop and ask the user
+  before editing files or committing.
+
 ## Steps
 
 1. Check the current state:
