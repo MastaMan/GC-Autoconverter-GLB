@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.5
+VERSION=1.1.6
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -79,6 +79,11 @@ Auto Converter to GLB/SKP/BLEND script=
 
 [1.1.5]
 + Improved: Telegram processing image captions include AID, status, Model ID, Version ID, slug and mode=
+
+[1.1.6]
++ Improved: MeshSmooth and TurboSmooth are prepared before automatic scene collapse and attach operations=
++ Added: Configurable 3ds Max AO unwrap polygon limit=
++ Improved: Server logs now report skipped AO baking when the 3ds Max unwrap polygon limit is exceeded=
 
 [FILES]
 Install.mcr=
@@ -3602,7 +3607,40 @@ struct BatchGLBConverterWrapper (
 		return method
 	),
 
-	fn autoUnwrapWithMax obj = (
+	fn getMaxUnwrapAOPolyLimit = (
+		local limit = '*'.get "spnMaxUnwrapAOPolyLimit" type: #int
+		if (limit < 1) do limit = 100000
+		return limit
+	),
+
+	fn getObjectPolyCount obj = (
+		if (obj == undefined or not isValidNode obj or isDeleted obj) do return 0
+		local polyStats = try (getPolygonCount obj) catch (#(0, 0))
+		return polyStats[1]
+	),
+
+	fn postAOServerLog txt ao: undefined = (
+		local shouldPost = try (ao.postLogs == true) catch (false)
+		if (shouldPost) do try (requestMgr.postLog txt: txt) catch ()
+		return shouldPost
+	),
+
+	fn canBakeAOWithMaxUnwrap obj ao: undefined = (
+		local polyLimit = this.getMaxUnwrapAOPolyLimit()
+		local objectPolys = this.getObjectPolyCount obj
+
+		if (objectPolys > polyLimit) do (
+			local msg = "[Warning] AO baking skipped for object " + obj.name + ". 3ds Max Unwrap polygon limit exceeded. Polygons: " + (objectPolys as string) + ". Limit: " + (polyLimit as string) + "."
+			print msg
+			this.postAOServerLog msg ao: ao
+			return false
+		)
+
+		return true
+	),
+
+	fn autoUnwrapWithMax obj ao: undefined = (
+		if (not (this.canBakeAOWithMaxUnwrap obj ao: ao)) do return false
 		try (watchdogMgr.beat stage: ("auto_unwrap:" + obj.name)) catch()
 		with redraw off with undo off (
 			select obj
@@ -3654,7 +3692,7 @@ struct BatchGLBConverterWrapper (
 		if (method == "blender") then (
 			return (this.autoUnwrapWithBlender obj ao: ao)
 		) else (
-			return (this.autoUnwrapWithMax obj)
+			return (this.autoUnwrapWithMax obj ao: ao)
 		)
 	),
 
@@ -3899,7 +3937,7 @@ struct BatchGLBConverterWrapper (
 			local f = this.generateCacheFilename()
 			local isUnwrapped = this.autoUnwrap o ao: ao
 			if (isUnwrapped != true) then (
-				print ("[Warning] AO baking skipped because unwrap failed for object: " + o.name)
+				print ("[Warning] AO baking skipped for object: " + o.name)
 			) else (
 				if (ao.type == #corona) do (
 					this.bakeCoronaAO o f ao: ao
@@ -5018,12 +5056,15 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			if (postLogs) do requestMgr.postLog txt: txt
 		)
 
-		lblStatus.caption = "Preparing scene: BoxTrick, Attach All, Set Pivot..."
+		lblStatus.caption = "Preparing scene: MeshSmooth, BoxTrick, Attach All, Set Pivot..."
 		try (watchdogMgr.beat stage: "preparing_scene") catch()
 		logMessage ("Preparing scene for conversion: " + glbName) postLogs: postLogs
 
 		explodeAllGroups()
 		disableIsolineDisplayForSmooth()
+		try (watchdogMgr.beat stage: "pre_normalize_mesh_smooth") catch()
+		local isMeshSmoothPrepared = try (::API_BATCH_GLB_CONVERTER.neutralizeMeshSmooth()) catch (false)
+		if (isMeshSmoothPrepared != true) do logMessage "[Warning] MeshSmooth/TurboSmooth preparation failed before scene collapse." postLogs: postLogs
 		boxTrick()
 		resetXForAllObjects()
 		attachSceneObjects()
@@ -5217,7 +5258,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		escapeEnable = true
 		clearListener()
 
-		struct AO_Settings (enabled, passes, resolution, denoise, size, type)
+		struct AO_Settings (enabled, passes, resolution, denoise, size, type, postLogs)
 		local ao = AO_Settings()
 		ao.enabled = cbxBakeCoronaAO.checked
 		ao.size = (::_rGCAutoGLBConverter_Settings.spnAOSize.value as string) + "cm"
@@ -5225,6 +5266,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		ao.resolution = ::_rGCAutoGLBConverter_Settings.spnAOResolution.value
 		ao.denoise = ::_rGCAutoGLBConverter_Settings.cbxAODenoise.checked
 		ao.type = #corona
+		ao.postLogs = true
 		local watchdogAttempts = watchdogMgr.getAttemptsFor slug a_id
 		local watchdogAttemptStage = watchdogMgr.getAttemptStageFor slug a_id
 		if (ao.enabled and watchdogAttempts > 0 and (watchdogMgr.isAOAttemptStage watchdogAttemptStage)) do (
@@ -5801,11 +5843,12 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 	)
 
 	group "AO Unwrap Method" (
-		radiobuttons rdoAOUnwrapMethod labels: #("3ds Max Unwrap", "Blender Unwrap") columns: 2 default: 1
+		spinner spnMaxUnwrapAOPolyLimit "Max. Unwrap poly limit:" range: [1, 999999999, 100000] type: #integer fieldwidth: 70 align: #left
+		radiobuttons rdoAOUnwrapMethod labels: #("3ds Max Unwrap", "Blender Unwrap") columns: 2 default: 1 align: #left
 	)
 
 	group "Watchdog Settings" (
-		spinner spnWatchdogTimeoutMin "Stuck timeout (min):" range: [1, 999, 15] type: #integer fieldwidth: 50 align: #right
+		spinner spnWatchdogTimeoutMin "Stuck on operation timeout (min):" range: [1, 999, 15] type: #integer fieldwidth: 50 align: #left
 	)
 
 	fn loadSettings = (
@@ -5817,6 +5860,9 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 
 		local r = '*'.get "spnAOResolution" type: #int
 		spnAOResolution.value = if (r != 0) then r else 1024
+
+		local maxUnwrapLimit = '*'.get "spnMaxUnwrapAOPolyLimit" type: #int
+		spnMaxUnwrapAOPolyLimit.value = if (maxUnwrapLimit != 0) then maxUnwrapLimit else 100000
 
 		cbxAODenoise.checked = '*'.get "cbxAODenoise" type: #bool_false
 		local unwrapMethod = '*'.get "aoUnwrapMethod"
@@ -5830,6 +5876,7 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 	on spnAOPasses changed v do '*'.add  "spnAOPasses" v
 	on spnAOSize changed v do '*'.add  "spnAOSize" v
 	on spnAOResolution changed v do '*'.add  "spnAOResolution" v
+	on spnMaxUnwrapAOPolyLimit changed v do '*'.add "spnMaxUnwrapAOPolyLimit" v
 	on cbxAODenoise changed v do '*'.add  "cbxAODenoise" v
 	on rdoAOUnwrapMethod changed state do (
 		local unwrapMethod = if (state == 2) then "blender" else "max"
@@ -5885,7 +5932,7 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 	)
 
 	fn buildAOSettings = (
-		struct Debug_AO_Settings (enabled, passes, resolution, denoise, size, type)
+		struct Debug_AO_Settings (enabled, passes, resolution, denoise, size, type, postLogs)
 		local ao = Debug_AO_Settings()
 		local aoSize = try (::_rGCAutoGLBConverter_Settings.spnAOSize.value) catch (5.0)
 		ao.enabled = cbxDebugBakeCoronaAO.checked
@@ -5894,6 +5941,7 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 		ao.resolution = try (::_rGCAutoGLBConverter_Settings.spnAOResolution.value) catch (1024)
 		ao.denoise = try (::_rGCAutoGLBConverter_Settings.cbxAODenoise.checked) catch (false)
 		ao.type = #corona
+		ao.postLogs = false
 		return ao
 	)
 
