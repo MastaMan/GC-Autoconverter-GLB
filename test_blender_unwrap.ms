@@ -343,7 +343,7 @@ rollout _rGCTestBlenderUnwrap "Blender Unwrap Test" width: 620 (
 	on _rGCTestBlenderUnwrap open do (
 		edtLog.Multiline = true
 		edtLog.ScrollBars = (dotNetClass "System.Windows.Forms.ScrollBars").Vertical
-		edtLog.WordWrap = false
+		edtLog.WordWrap = true
 		edtLog.ReadOnly = true
 		loadSettings()
 		refreshSelectionLabel()

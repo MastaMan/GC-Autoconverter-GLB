@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.7
+VERSION=1.1.8
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -89,6 +89,11 @@ Auto Converter to GLB/SKP/BLEND script=
 + Improved: Sphere cleanup now removes collapsed sphere-like helper objects by topology=
 + Improved: Sphere cleanup also runs for directly loaded MAX files=
 + Added: Coding rule for numeric range loops without equals sign=
+
+[1.1.8]
++ Added: Optional local IP query parameter support for Web API requests=
++ Improved: Web API request tester uses the same API URL builder as the main request wrapper=
++ Improved: DotNet log text boxes in test scripts now wrap long lines=
 
 [FILES]
 Install.mcr=
@@ -709,6 +714,8 @@ struct requestWrapper (
 	apiPostStatus = apiUrl  + "status.php",
 	apiPostLog = apiUrl  + "log.php",
 	apiKey = "",
+	sendIp = false,
+	localIpWarningShown = false,
 	fn setBaseUrl url = (
 		if (url == undefined) do url = ""
 		url = trimLeft (trimRight (url as string))
@@ -720,6 +727,62 @@ struct requestWrapper (
 		apiPostStatus = apiUrl + "status.php"
 		apiPostLog = apiUrl + "log.php"
 	),
+	fn getLocalIPAddress = (
+		local ipAddress = undefined
+
+		try (
+			local dns = dotNetClass "System.Net.Dns"
+			local host = dns.GetHostEntry (dns.GetHostName())
+
+			for ip in host.AddressList do (
+				if (ip.AddressFamily.ToString() == "InterNetwork") do (
+					local s = ip.ToString()
+					if (matchPattern s pattern: "127.*" == false) do (
+						ipAddress = s
+						exit
+					)
+				)
+			)
+		) catch (
+			ipAddress = undefined
+		)
+
+		return ipAddress
+	),
+	fn encodeQueryValue value = (
+		if (value == undefined) do return ""
+		local uri = dotNetClass "System.Uri"
+		return uri.EscapeDataString (value as string)
+	),
+	fn addQueryParam url key value = (
+		if (url == undefined) do return ""
+		if (value == undefined) do return (url as string)
+
+		local result = url as string
+		local separator = if ((findString result "?") == undefined) then "?" else "&"
+		result += separator + (key as string) + "=" + (this.encodeQueryValue value)
+		return result
+	),
+	fn buildApiUrl url includeTime: false = (
+		local result = if (url == undefined) then "" else (url as string)
+
+		if (sendIp) do (
+			local ipAddress = this.getLocalIPAddress()
+
+			if (ipAddress != undefined and ipAddress != "") then (
+				result = this.addQueryParam result "ip" ipAddress
+			) else if (not localIpWarningShown) do (
+				print "[Warning] Local IP address was not found. API request will be sent without ip query parameter."
+				localIpWarningShown = true
+			)
+		)
+
+		if (includeTime) do (
+			result = this.addQueryParam result "time" ((timestamp()) as string)
+		)
+
+		return result
+	),
 	fn downloadString lnk headers: #(#("x-api-key", apiKey)) = (
 		local w = dotNetObject "System.Net.WebClient"
 		try(
@@ -727,7 +790,7 @@ struct requestWrapper (
 			spm.SecurityProtocol = spm.SecurityProtocol.TLS12
 			local h = dotnetclass "System.Net.HttpRequestHeader"
 			for i in headers do w.Headers.add i[1] i[2]
-			local ss = w.downloadString (lnk + "?time=" + timestamp() as string)
+			local ss = w.downloadString (this.buildApiUrl lnk includeTime: true)
 			w.Dispose()
 			return ss
 		) catch(
@@ -751,7 +814,7 @@ struct requestWrapper (
 					client.Headers.Add h[1] (h[2] as string)
 				)
 			)
-			lastResponse = client.UploadString url "POST" jj
+			lastResponse = client.UploadString (this.buildApiUrl url) "POST" jj
 
 			jr.read lastResponse
 			result = jr.getBool "success"
@@ -4765,7 +4828,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local txt = "GC Autoconverter GLB API error\n\n"
 		txt += "Mode: " + modeLabel + "\n"
 		txt += "Queue API failed 3 times in a row.\n"
-		txt += "URL: " + requestMgr.apiGetQueue + "\n\n"
+		txt += "URL: " + (requestMgr.buildApiUrl requestMgr.apiGetQueue includeTime: true) + "\n\n"
 		txt += "Response:\n" + (shortenText response)
 
 		if (telegramMgr.checkCredentialsError()) do (

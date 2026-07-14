@@ -101,7 +101,7 @@ rollout _rGCTestRequest "Web API Request Test" width: 620 (
 
 	fn repeatText txt count = (
 		local result = ""
-		for i = 1 to count do result += txt
+		for i in 1 to count do result += txt
 		return result
 	)
 
@@ -120,7 +120,7 @@ rollout _rGCTestRequest "Web API Request Test" width: 620 (
 		local nl = "\r\n"
 		local indentText = "  "
 
-		for i = 1 to s.count do (
+		for i in 1 to s.count do (
 			local ch = substring s i 1
 
 			if (inString) then (
@@ -216,6 +216,10 @@ rollout _rGCTestRequest "Web API Request Test" width: 620 (
 		)
 	)
 
+	fn buildActualRequestUrl mgr url includeTime: false = (
+		return mgr.buildApiUrl url includeTime: includeTime
+	)
+
 	fn validateRequestMgr mgr = (
 		if (mgr == undefined) do (
 			setResult "requestMgr not found. Run the main script first."
@@ -241,8 +245,7 @@ rollout _rGCTestRequest "Web API Request Test" width: 620 (
 			client.Encoding = (dotNetClass "System.Text.Encoding").GetEncoding("UTF-8")
 			client.Headers.Add "Accept" "application/json"
 			client.Headers.Add "x-api-key" (apiKey as string)
-			local glue = if ((findString url "?") == undefined) then "?" else "&"
-			response = client.DownloadString (url + glue + "time=" + ((timestamp()) as string))
+			response = client.DownloadString url
 		) catch (
 			local ex = getCurrentException()
 			response = "[Exception]\n" + (ex as string)
@@ -283,19 +286,22 @@ rollout _rGCTestRequest "Web API Request Test" width: 620 (
 		)
 
 		local url = getRequestUrl mgr requestName
+		local actualUrl = ""
 		local body = ""
 		local response = ""
 
-		setResult ("Sending: " + requestName + "\nURL: " + url)
-
 		if (requestName == "GET queue") then (
-			response = sendGet url mgr.apiKey
+			actualUrl = buildActualRequestUrl mgr url includeTime: true
+			setResult ("Sending: " + requestName + "\nURL: " + actualUrl)
+			response = sendGet actualUrl mgr.apiKey
 		) else (
+			actualUrl = buildActualRequestUrl mgr url
+			setResult ("Sending: " + requestName + "\nURL: " + actualUrl)
 			body = buildPostBody requestName edtText.text
-			response = sendPost url mgr.apiKey body
+			response = sendPost actualUrl mgr.apiKey body
 		)
 
-		local logText = requestName + "\na_id: " + (spnAutoconvertionId.value as string) + "\nURL: " + url
+		local logText = requestName + "\na_id: " + (spnAutoconvertionId.value as string) + "\nURL: " + actualUrl
 		if (body != "") do logText += "\n\nRequest body:\n" + (prettyJson body)
 		logText += "\n\nResponse:\n" + (prettyJson response)
 
@@ -310,8 +316,8 @@ rollout _rGCTestRequest "Web API Request Test" width: 620 (
 	on _rGCTestRequest open do (
 		edtLog.Multiline = true
 		edtLog.ReadOnly = true
-		edtLog.WordWrap = false
-		edtLog.ScrollBars = (dotNetClass "System.Windows.Forms.ScrollBars").Both
+		edtLog.WordWrap = true
+		edtLog.ScrollBars = (dotNetClass "System.Windows.Forms.ScrollBars").Vertical
 		edtLog.Font = dotNetObject "System.Drawing.Font" "Consolas" 9
 		spnAutoconvertionId.value = fixedAutoconvertionId
 		ddlRequest.selection = 1
