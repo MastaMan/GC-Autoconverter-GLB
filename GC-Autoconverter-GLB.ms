@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.3
+VERSION=1.1.4
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -73,6 +73,9 @@ Auto Converter to GLB/SKP/BLEND script=
 + Improved: Watchdog displays AID above Model ID=
 + Improved: Telegram processing reports include AID above Model ID=
 - BugFix: Debug Convert Current Scene returns to the source scene after conversion=
+
+[1.1.4]
+- BugFix: MeshSmooth and TurboSmooth render iterations are applied before GLB geometry collapse=
 
 [FILES]
 Install.mcr=
@@ -3119,13 +3122,29 @@ struct BatchGLBConverterWrapper (
 		local a = #()
 		for i in getClassInstances MeshSmooth do appendIfUnique a i
 		for i in getClassInstances TurboSmooth do appendIfUnique a i
-		
+
 		for i in a do (
-			if (i.renderIterations > i.iterations) do i.iterations = i.renderIterations
-			if (i.iterations > 2) do i.iterations = 2
+			local viewportIterations = try (i.iterations as integer) catch (0)
+			local renderIterations = try (i.renderIterations as integer) catch (viewportIterations)
+			local targetIterations = viewportIterations
+
+			if (renderIterations > targetIterations) do targetIterations = renderIterations
+			if (targetIterations > 2) do targetIterations = 2
+
+			try (i.enabled = true) catch ()
+			try (i.enabledInViews = true) catch ()
+			try (i.enabledInRenders = true) catch ()
+			try (i.showInViewport = true) catch ()
+			try (i.showInRenderer = true) catch ()
+			try (i.useRenderIterations = false) catch ()
+			try (i.separateRenderSettings = false) catch ()
+			try (i.iterations = targetIterations) catch ()
+			try (i.renderIterations = targetIterations) catch ()
 			try (i.isolineDisplay = false) catch ()
 		)
-	)
+
+		return true
+	),
 
 	fn neutralizeRaySwitch = (
 		for i in getClassInstances CoronaRaySwitchMtl do (
