@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.8
+VERSION=1.1.9
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -94,6 +94,11 @@ Auto Converter to GLB/SKP/BLEND script=
 + Added: Optional local IP query parameter support for Web API requests=
 + Improved: Web API request tester uses the same API URL builder as the main request wrapper=
 + Improved: DotNet log text boxes in test scripts now wrap long lines=
+
+[1.1.9]
++ Improved: Converted output file names now use autoconversion id without slug=
++ Improved: GLTF material conversion preserves more glass absorption color and roughness detail=
++ BugFix: 3ds Max restart uses the current script path when launching restart.bat=
 
 [FILES]
 Install.mcr=
@@ -3481,7 +3486,7 @@ struct BatchGLBConverterWrapper (
 		return false
 	),
 
-	fn coronaPhysicalMtlToGltfMaterial falloffMaterials: #() = (
+		fn coronaPhysicalMtlToGltfMaterial falloffMaterials: #() = (
 		for i in getClassInstances CoronaPhysicalMtl do (
 			i.roughnessMode = 0
 			local nm = glTFMaterial()
@@ -3615,7 +3620,7 @@ struct BatchGLBConverterWrapper (
 			)
 
 			-- Force Clamp Roughness
-			if (nm.roughness > 0.75) do nm.roughness = 0.75
+			if (nm.roughness > 0.96) do nm.roughness = 0.96
 
 			-- Force set prams for specific presets
 			if (preset == #cloth) do (
@@ -3638,14 +3643,18 @@ struct BatchGLBConverterWrapper (
 				nm.enableSheen = true
 				nm.sheenRoughness = 0.3
 				nm.sheenColor = color 255 255 255 255
-				nm.indexOfRefraction = 20
+				nm.indexOfRefraction = 1.75
+
 				nm.AlphaMap = ColorMap()
 				nm.AlphaMap.solidcolor = color 110 110 110
 				nm.alphaMode = 3
 
 				this.addTextureToQueue nm.AlphaMap
-			)
 
+				if (i.volumetricAbsorptionColor != color 127.5 127.5 127.5) do (
+					nm.baseColor = i.volumetricAbsorptionColor
+				)
+			)
 
 			-- Replacement
 			replaceInstances i nm
@@ -4776,6 +4785,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	)
 
 	fn restart3dsMax = (
+		local currentPath = getFileNamePath (getThisScriptFileName())
 		local maxExe = (pathConfig.GetDir #maxroot) + "3dsmax.exe"
 		local args = maxExe + ";"
 		local cmd = "restart.bat \"" + args + "\""
@@ -5324,7 +5334,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local status_id = jr.getString "status_id"
 		local source_original_name = jr.getString "source_original_name"
 		local count_total = jr.getInt "count_total"
-		local outputBaseName = a_id + "-" + slug
+		local outputBaseName = a_id
 		requestMgr.a_id = a_id
 		requestMgr.model_id = model_id
 		requestMgr.version_id = version_id
