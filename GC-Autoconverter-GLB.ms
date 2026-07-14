@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.4
+VERSION=1.1.5
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -76,6 +76,9 @@ Auto Converter to GLB/SKP/BLEND script=
 
 [1.1.4]
 - BugFix: MeshSmooth and TurboSmooth render iterations are applied before GLB geometry collapse=
+
+[1.1.5]
++ Improved: Telegram processing image captions include AID, status, Model ID, Version ID, slug and mode=
 
 [FILES]
 Install.mcr=
@@ -4854,6 +4857,14 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		local modeLabel = getCredentialsModeLabel (getCredentialsMode())
 		local title = if (isSuccess) then "GC Autoconverter GLB: uploaded successfully" else "GC Autoconverter GLB: processing failed"
+		local statusLabel = if (isSuccess) then "Uploaded" else "Failed"
+		local photoCaption = "GC Autoconverter GLB\n"
+		photoCaption += "AID: " + (requestMgr.a_id as string) + "\n"
+		photoCaption += "Status: " + statusLabel + "\n"
+		photoCaption += "Model ID: " + (requestMgr.model_id as string) + "\n"
+		photoCaption += "Version ID: " + (requestMgr.version_id as string) + "\n"
+		photoCaption += "Slug: " + slug + "\n"
+		photoCaption += "Mode: " + modeLabel
 		local txt = title + "\n\n"
 		txt += "Mode: " + modeLabel + "\n"
 		txt += "Slug: " + slug + "\n"
@@ -4881,7 +4892,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local isPhotoSent = true
 		local photoError = ""
 		if (image != "" and doesFileExist image) do (
-			isPhotoSent = telegramMgr.sendPhoto title image
+			isPhotoSent = telegramMgr.sendPhoto photoCaption image
 			if (not isPhotoSent) do photoError = telegramMgr.getLastError()
 		)
 
