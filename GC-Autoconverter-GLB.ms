@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.1.9
+VERSION=1.1.10
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -99,6 +99,10 @@ Auto Converter to GLB/SKP/BLEND script=
 + Improved: Converted output file names now use autoconversion id without slug=
 + Improved: GLTF material conversion preserves more glass absorption color and roughness detail=
 + BugFix: 3ds Max restart uses the current script path when launching restart.bat=
+
+[1.1.10]
++ Improved: S3 uploads now use the results/ bucket prefix=
++ Improved: Upload logs and result_json now report S3 object keys with the results/ prefix=
 
 [FILES]
 Install.mcr=
@@ -1052,6 +1056,7 @@ struct awsUploaderWrapper (
 	bucket = "",
 	user = "",
 	key = "",
+	s3Prefix = "results",
 
 	fn readUploadLog logFile = (
 		if (logFile == undefined or logFile == "" or not doesFileExist logFile) do return ""
@@ -1070,13 +1075,27 @@ struct awsUploaderWrapper (
 		return trimRight result
 	),
 
+	fn getObjectKey f = (
+		local fileName = filenameFromPath f
+		local prefix = trimLeft (trimRight (s3Prefix as string))
+		prefix = substituteString prefix "\\" "/"
+
+		while (prefix.count > 0 and (substring prefix prefix.count 1) == "/") do (
+			prefix = substring prefix 1 (prefix.count - 1)
+		)
+
+		if (prefix == "") do return fileName
+		return prefix + "/" + fileName
+	),
+
 	fn upload f = (
 		if (f == undefined or f == "") do return #("false", "Upload failed: empty file path.", 2)
 		if (not doesFileExist f) do return #("false", ("Upload failed: file does not exist: " + f), 3)
 
 		local n = filenameFromPath f
+		local s3Key = this.getObjectKey f
 		local logFile = (getDir #temp) + "\\s3-uploader-" + (timestamp() as string) + ".log"
-		local args = f + ";" + bucket + ";" + region + ";" + n + ";" + user + ";" + key + ";" + logFile
+		local args = f + ";" + bucket + ";" + region + ";" + s3Key + ";" + user + ";" + key + ";" + logFile
 		local cmd = "s3-uploader.bat \"" +  args + "\""
 		local exitcode = 0
 		local curDir = sysInfo.currentDir
@@ -1090,7 +1109,7 @@ struct awsUploaderWrapper (
 		sysInfo.currentDir = curDir
 
 		if (exitcode == 0) then (
-			return #("true", ("Uploaded to S3: " + n), exitcode)
+			return #("true", ("Uploaded to S3: " + s3Key), exitcode, s3Key)
 		) else (
 			local curlLog = readUploadLog logFile
 			local msg = case exitcode of (
@@ -1105,7 +1124,7 @@ struct awsUploaderWrapper (
 				format "S3 upload error for %:\n%\n" n curlLog
 				msg += "\n\nCurl output:\n" + curlLog
 			)
-			return #("false", msg, exitcode)
+			return #("false", msg, exitcode, s3Key)
 		)
 	),
 	fn checkCredentialsError = (
@@ -4950,13 +4969,14 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		for f in uploadedFiles do (
 			local fileName = filenameFromPath f
 			local lowerName = toLower (getFilenameFile fileName)
+			local objectKey = substituteString (f as string) "\\" "/"
 
 			if (regex.IsMatch lowerName "-glb(-[0-9]+)?(-webgl)?$") then (
-				append glbFiles fileName
+				append glbFiles objectKey
 			) else if (regex.IsMatch lowerName "-blend(-[0-9]+)?$") then (
-				append blendFiles fileName
+				append blendFiles objectKey
 			) else if (regex.IsMatch lowerName "-skp(-[0-9]+)?$") then (
-				append skpFiles fileName
+				append skpFiles objectKey
 			)
 		)
 
@@ -5498,22 +5518,24 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		for f in expectedExitFiles do (
 			uploadIndex += 1
 			local fileName = filenameFromPath f
+			local objectKey = awsUploaderMgr.getObjectKey f
 			try (watchdogMgr.beat stage: ("uploading_file_" + (uploadIndex as string))) catch()
 
 			if (not doesFileExist f) then (
 				local m = "[Error] Upload skipped. File does not exist: " + fileName
-				append failedFiles fileName
+				append failedFiles objectKey
 				postProcessLog m
 			) else (
 				local uploadResult = awsUploaderMgr.upload f
 				local isUploaded = (uploadResult[1] == "true")
 				local uploadMessage = uploadResult[2]
+				local uploadedObjectKey = if (uploadResult.count >= 4) then uploadResult[4] else objectKey
 
 				if (isUploaded) then (
-					append uploadedFiles fileName
-					postProcessLog ("Uploaded to S3: " + fileName)
+					append uploadedFiles uploadedObjectKey
+					postProcessLog ("Uploaded to S3: " + uploadedObjectKey)
 				) else (
-					append failedFiles fileName
+					append failedFiles uploadedObjectKey
 					postProcessLog ("[Error] " + uploadMessage)
 				)
 			)
