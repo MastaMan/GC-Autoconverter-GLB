@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.2.0
+VERSION=1.2.1
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -103,6 +103,11 @@ Auto Converter to GLB/SKP/BLEND script=
 [1.2.0]
 + Improved: S3 uploads now use the results/ bucket prefix=
 + Improved: Upload logs and result_json now report S3 object keys with the results/ prefix=
+
+[1.2.1]
++ Added: Scene preflight validation for unsupported Corona, V-Ray, Hair/Fur, OSL and Real-World Scale Mapping features=
++ Improved: Polygon limit failures now use detailed preflight diagnostics with reason and fix hints=
++ Improved: Successful status text now includes collected warning messages when conversion finishes with warnings=
 
 [FILES]
 Install.mcr=
@@ -2767,6 +2772,335 @@ struct BlenderUnwrapWrapper (
 	)
 )
 
+struct PreflightIssue (
+	severity,
+	issueType,
+	location,
+	technical,
+	reason,
+	fixHint,
+	val
+)
+
+struct PreflightWrapper (
+	fn makeIssue severity issueType location technical reason fixHint val: "" = (
+		local issue = PreflightIssue severity: severity issueType: issueType location: location technical: technical reason: reason fixHint: fixHint val: val
+		return issue
+	),
+
+	fn getIssueKey issue = (
+		return ((issue.severity as string) + "|" + (issue.issueType as string) + "|" + (issue.location as string) + "|" + (issue.technical as string) + "|" + (issue.val as string))
+	),
+
+	fn appendUniqueIssue issues issue = (
+		local issueKey = this.getIssueKey issue
+		local isExisting = false
+
+		for existingIssue in issues while (not isExisting) do (
+			if ((this.getIssueKey existingIssue) == issueKey) do isExisting = true
+		)
+
+		if (not isExisting) do append issues issue
+		return issues
+	),
+
+	fn getSafeClassName item = (
+		local className = "Unknown"
+		try (className = (classOf item) as string) catch ()
+		return className
+	),
+
+	fn getSafeObjectName item = (
+		local objectName = "<unnamed>"
+		try (
+			if (item.name != undefined and (item.name as string) != "") do objectName = item.name as string
+		) catch ()
+
+		return objectName
+	),
+
+	fn getMapLocation item = (
+		local mapName = this.getSafeObjectName item
+		local fileName = ""
+		try (
+			if (item.filename != undefined and (item.filename as string) != "") do fileName = filenameFromPath item.filename
+		) catch ()
+
+		if (fileName != "") do return (mapName + " (" + fileName + ")")
+		return mapName
+	),
+
+	fn classNameMatches className patterns = (
+		local lowerClassName = toLower (className as string)
+		local isMatched = false
+
+		for pattern in patterns while (not isMatched) do (
+			if (matchPattern lowerClassName pattern:(toLower pattern)) do isMatched = true
+		)
+
+		return isMatched
+	),
+
+	fn collectMapsFromValue item maps depth: 0 = (
+		if (item == undefined) do return maps
+		if (depth > 20) do return maps
+
+		local isTexture = try (isKindOf item textureMap) catch (false)
+		if (isTexture) do appendIfUnique maps item
+
+		local texmapCount = 0
+		try (texmapCount = getNumSubTexmaps item) catch (texmapCount = 0)
+
+		if (texmapCount > 0) do (
+			for i in 1 to texmapCount do (
+				local subMap = undefined
+				try (subMap = getSubTexmap item i) catch (subMap = undefined)
+				if (subMap != undefined) do (
+					appendIfUnique maps subMap
+					this.collectMapsFromValue subMap maps depth: (depth + 1)
+				)
+			)
+		)
+
+		return maps
+	),
+
+	fn collectSceneMaps = (
+		local maps = #()
+
+		for materialValue in sceneMaterials do (
+			this.collectMapsFromValue materialValue maps
+		)
+
+		for objectValue in objects where isValidNode objectValue and not isDeleted objectValue do (
+			local objectMaterial = undefined
+			try (objectMaterial = objectValue.material) catch (objectMaterial = undefined)
+			if (objectMaterial != undefined) do this.collectMapsFromValue objectMaterial maps
+		)
+
+		return maps
+	),
+
+	fn isMapRealWorldScaleEnabled mapValue = (
+		local isEnabled = false
+		local hasMapProperty = false
+		local hasCoordsProperty = false
+
+		try (
+			hasMapProperty = isProperty mapValue #realWorldScale
+			if (hasMapProperty and mapValue.realWorldScale == true) do isEnabled = true
+		) catch ()
+
+		if (not isEnabled) do (
+			try (
+				if (mapValue.coords != undefined) do (
+					hasCoordsProperty = isProperty mapValue.coords #realWorldScale
+					if (hasCoordsProperty and mapValue.coords.realWorldScale == true) do isEnabled = true
+				)
+			) catch ()
+		)
+
+		return isEnabled
+	),
+
+	fn getBitmapTilingWarningValue mapValue = (
+		local warningValue = ""
+		local uTiling = 1.0
+		local vTiling = 1.0
+		local hasTiling = false
+
+		try (
+			if (mapValue.coords != undefined) do (
+				uTiling = mapValue.coords.U_Tiling as float
+				vTiling = mapValue.coords.V_Tiling as float
+				hasTiling = true
+			)
+		) catch (hasTiling = false)
+
+		if (hasTiling and ((abs (uTiling - 1.0)) > 0.0001 or (abs (vTiling - 1.0)) > 0.0001)) do (
+			warningValue = "U=" + (uTiling as string) + ", V=" + (vTiling as string)
+		)
+
+		return warningValue
+	),
+
+	fn addUnsupportedObjectIssue issues item ownerName className = (
+		if (this.classNameMatches className #("*vrayfur*", "*vray fur*")) do (
+			local issue = this.makeIssue #error "V-Ray Fur object" ownerName className "V-Ray Fur cannot be exported correctly to GLB as regular geometry." "Convert the fur to mesh if it must be exported, or remove it from the scene."
+			this.appendUniqueIssue issues issue
+		)
+
+		return issues
+	),
+
+	fn addUnsupportedModifierIssue issues modifierValue ownerName className = (
+		if (this.classNameMatches className #("*hairandfur*", "*hair_and_fur*", "*hair*fur*", "*hairmod*", "*coronahairmod*", "*corona*hair*", "*vrayfur*", "*vray fur*")) do (
+			local issueType = if (this.classNameMatches className #("*coronahairmod*", "*corona*hair*")) then "Corona Hair modifier" else if (this.classNameMatches className #("*vrayfur*", "*vray fur*")) then "V-Ray Fur modifier" else "Hair And Fur modifier"
+			local issue = this.makeIssue #error issueType ownerName className "Hair and fur modifiers cannot be exported correctly to GLB." "Convert hair/fur to mesh if it must be exported, or remove this modifier from the scene."
+			this.appendUniqueIssue issues issue
+		)
+
+		return issues
+	),
+
+	fn addUnsupportedMapIssues errors warnings mapValue = (
+		local className = this.getSafeClassName mapValue
+		local location = this.getMapLocation mapValue
+
+		if (this.classNameMatches className #("*coronatriplanar*", "*corona*triplanar*")) do (
+			local issue = this.makeIssue #error "Corona Triplanar map" location className "CoronaTriplanar cannot be exported correctly to GLB because it uses procedural triplanar projection instead of regular UV bitmap mapping." "Bake or convert the triplanar texture to a regular bitmap with UV mapping, then upload the model again."
+			this.appendUniqueIssue errors issue
+		)
+
+		if (this.classNameMatches className #("*osl*")) do (
+			local issue = this.makeIssue #error "OSL map" location className "OSL maps are procedural shader nodes and cannot be exported reliably to GLB." "Bake or replace the OSL map with a regular bitmap or another supported map, then upload the model again."
+			this.appendUniqueIssue errors issue
+		)
+
+		if (this.isMapRealWorldScaleEnabled mapValue) do (
+			local issue = this.makeIssue #error "Real-World Scale Mapping" location (className + ".realWorldScale") "This texture has realWorldScale enabled. Real-World Scale Mapping can change texture placement during GLB conversion." "Disable Real-World Scale Mapping and use explicit UV tiling before uploading the model again." val: "realWorldScale=true"
+			this.appendUniqueIssue errors issue
+		)
+
+		if (this.classNameMatches className #("*bitmaptexture*", "*bitmap texture*")) do (
+			local tilingValue = this.getBitmapTilingWarningValue mapValue
+			if (tilingValue != "") do (
+				local issue = this.makeIssue #warning "Non-default bitmap tiling" location (className + ".coords.U_Tiling/V_Tiling") "Bitmap texture tiling is not default. Texture scale may look different after conversion." "Verify texture scale after conversion. If needed, bake the texture or fix UVs before uploading." val: tilingValue
+				this.appendUniqueIssue warnings issue
+			)
+		)
+
+		return #(errors, warnings)
+	),
+
+	fn getSceneIssues = (
+		local errors = #()
+		local warnings = #()
+		local maps = this.collectSceneMaps()
+
+		for objectValue in objects where isValidNode objectValue and not isDeleted objectValue do (
+			local objectClassName = this.getSafeClassName objectValue
+			local objectName = this.getSafeObjectName objectValue
+			this.addUnsupportedObjectIssue errors objectValue objectName objectClassName
+
+			local modifierCount = 0
+			try (modifierCount = objectValue.modifiers.count) catch (modifierCount = 0)
+			if (modifierCount > 0) do (
+				for modifierIndex in 1 to modifierCount do (
+					local modifierValue = undefined
+					try (modifierValue = objectValue.modifiers[modifierIndex]) catch (modifierValue = undefined)
+					if (modifierValue != undefined) do (
+						local modifierClassName = this.getSafeClassName modifierValue
+						local modifierName = this.getSafeObjectName modifierValue
+						local modifierLocation = objectName + " > " + modifierName
+						this.addUnsupportedModifierIssue errors modifierValue modifierLocation modifierClassName
+					)
+				)
+			)
+		)
+
+		for mapValue in maps do this.addUnsupportedMapIssues errors warnings mapValue
+
+		return #(errors, warnings)
+	),
+
+	fn formatIssue issue = (
+		local message = "Found: " + (issue.issueType as string) + " \"" + (issue.location as string) + "\".\n"
+		message += "Technical: " + (issue.technical as string)
+		if ((issue.val as string) != "") do message += " (" + (issue.val as string) + ")"
+		message += "\n"
+		if (issue.severity == #warning) then (
+			message += "Why this matters: " + (issue.reason as string) + "\n"
+		) else (
+			message += "Why this fails: " + (issue.reason as string) + "\n"
+		)
+		message += "How to fix: " + (issue.fixHint as string)
+		return message
+	),
+
+	fn formatIssues issues title: "Scene preflight issues:" = (
+		local lines = title
+
+		for i in 1 to issues.count do (
+			lines += "\n\n" + (i as string) + ". " + (this.formatIssue issues[i])
+		)
+
+		return lines
+	),
+
+	fn getGeometryPolyStats nodes label: "" = (
+		local polys = (utilsWrapper()).polyCount nodes
+		return #(label, polys[1], polys[2], nodes.count)
+	),
+
+	fn getGeometryLayerPolyStats layerName = (
+		local layerObjects = #()
+
+		for objectValue in geometry where isValidNode objectValue and not isDeleted objectValue do (
+			local objectLayerName = try (objectValue.layer.name as string) catch ("")
+			if (objectLayerName == layerName) do append layerObjects objectValue
+		)
+
+		return this.getGeometryPolyStats layerObjects label: layerName
+	),
+
+	fn formatPolyStats stat = (
+		return stat[1] + " (" + (stat[2] as string) + " polys, " + (stat[4] as string) + " objects)"
+	),
+
+	fn formatPolyStatsList stats = (
+		local items = #()
+		for stat in stats do append items (this.formatPolyStats stat)
+		return implodeString items
+	),
+
+	fn makePolygonLimitIssue stat limit issueType = (
+		local location = stat[1] as string
+		local polys = stat[2]
+		local objectsCount = stat[4]
+		local technical = "polygons=" + (polys as string) + ", limit=" + (limit as string) + ", objects=" + (objectsCount as string)
+		local reason = "This exported variant has more polygons than the allowed limit. Large models can fail conversion, crash viewers, or be too heavy for web delivery."
+		local fixHint = "Reduce the polygon count for this scene/layer below " + (limit as string) + " polygons, then upload the model again."
+		local issue = this.makeIssue #error issueType location technical reason fixHint val: technical
+		return issue
+	),
+
+	fn getLayersOverPolyLimit layerNames limit = (
+		local failed = #()
+
+		for layerName in layerNames do (
+			local stat = this.getGeometryLayerPolyStats layerName
+			if (stat[2] > limit) do append failed stat
+		)
+
+		return failed
+	),
+
+	fn getLayerPolygonLimitIssues layerNames limit = (
+		local issues = #()
+
+		for layerName in layerNames do (
+			local stat = this.getGeometryLayerPolyStats layerName
+			if (stat[2] > limit) do (
+				local issue = this.makePolygonLimitIssue stat limit "Layer polygon limit exceeded"
+				this.appendUniqueIssue issues issue
+			)
+		)
+
+		return issues
+	),
+
+	fn getScenePolygonLimitIssue nodes limit label: "Whole scene" = (
+		local stat = this.getGeometryPolyStats nodes label: label
+		if (stat[2] > limit) do (
+			local issue = this.makePolygonLimitIssue stat limit "Scene polygon limit exceeded"
+			return issue
+		)
+
+		return undefined
+	)
+)
+
 struct BatchGLBConverterWrapper (
 	selfPath = getFilenamePath (getThisScriptFilename()),
 	texturesQueueNames = #(),
@@ -4500,6 +4834,7 @@ struct BatchGLBConverterWrapper (
 )
 
 global API_BATCH_GLB_CONVERTER = BatchGLBConverterWrapper()
+global preflightMgr = PreflightWrapper()
 
 
 global _rGCAutoGLBConverter_Main = undefined
@@ -5002,6 +5337,18 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		requestMgr.postLog txt: txt
 	)
 
+	fn getProcessWarningsText maxChars: 2000 = (
+		local warningLines = #()
+
+		for line in processTelegramLogs do (
+			local textLine = line as string
+			if (findString textLine "[Warning]" != undefined) do append warningLines textLine
+		)
+
+		if (warningLines.count == 0) do return ""
+		return implodeLines warningLines maxChars: maxChars
+	)
+
 	fn markProcessedFileInSession = (
 		processedFilesInSession += 1
 		updateRemainingFilesLabel()
@@ -5133,29 +5480,19 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	)
 
 	fn getGeometryPolyStats nodes label: "" = (
-		local polys = (utilsWrapper()).polyCount nodes
-		return #(label, polys[1], polys[2], nodes.count)
+		return ::preflightMgr.getGeometryPolyStats nodes label: label
 	)
 
 	fn getGeometryLayerPolyStats layerName = (
-		local layerObjects = #()
-
-		for o in geometry where isValidNode o and not isDeleted o do (
-			local objectLayerName = try (o.layer.name as string) catch ("")
-			if (objectLayerName == layerName) do append layerObjects o
-		)
-
-		return getGeometryPolyStats layerObjects label: layerName
+		return ::preflightMgr.getGeometryLayerPolyStats layerName
 	)
 
 	fn formatPolyStats stat = (
-		return stat[1] + " (" + (stat[2] as string) + " polys, " + (stat[4] as string) + " objects)"
+		return ::preflightMgr.formatPolyStats stat
 	)
 
 	fn formatPolyStatsList stats = (
-		local items = #()
-		for stat in stats do append items (formatPolyStats stat)
-		return implodeString items
+		return ::preflightMgr.formatPolyStatsList stats
 	)
 
 	fn logLayerPolyStats layerNames = (
@@ -5168,14 +5505,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	)
 
 	fn getLayersOverPolyLimit layerNames = (
-		local failed = #()
-
-		for layerName in layerNames do (
-			local stat = getGeometryLayerPolyStats layerName
-			if (stat[2] > _MAX_ALLOWED_POLYS) do append failed stat
-		)
-
-		return failed
+		return ::preflightMgr.getLayersOverPolyLimit layerNames _MAX_ALLOWED_POLYS
 	)
 
 	fn keepOnlyGeometryFromLayer layerName = (
@@ -5436,6 +5766,23 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			return failCurrentProcess slug source_original_name "Cannot open scene file."
 		)
 
+		try (watchdogMgr.beat stage: "checking_unsupported_scene_features") catch()
+		local preflightIssues = ::preflightMgr.getSceneIssues()
+		local preflightErrors = preflightIssues[1]
+		local preflightWarnings = preflightIssues[2]
+
+		if (preflightWarnings.count > 0) do (
+			local warningReport = ::preflightMgr.formatIssues preflightWarnings title: "[Warning] Scene preflight warnings:"
+			postProcessLog warningReport
+		)
+
+		if (preflightErrors.count > 0) do (
+			local errorReport = ::preflightMgr.formatIssues preflightErrors title: "Unsupported scene features detected. Conversion stopped."
+			local shortError = "Unsupported scene features detected. Conversion stopped. Check conversion log for details."
+			postProcessLog errorReport
+			return failCurrentProcess slug source_original_name shortError statusCaption: "Unsupported scene features detected. Skipping file."
+		)
+
 		local expectedExitFiles = #()
 		local layerNames = getGeometryLayerNames()
 		local splitByLayers = layerNames.count > 1
@@ -5448,10 +5795,12 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			logLayerPolyStats layerNames
 
 			try (watchdogMgr.beat stage: "checking_polygons") catch()
-			local failedLayerStats = getLayersOverPolyLimit layerNames
-			if (failedLayerStats.count > 0) do (
-				local m = "Layer polygon limit exceeded. Limit per layer: " + (_MAX_ALLOWED_POLYS as string) + ". Failed layers: " + (formatPolyStatsList failedLayerStats) + "."
-				return failCurrentProcess slug source_original_name m statusCaption: "Layer polygon limit exceeded. Skipping file."
+			local polygonLimitIssues = ::preflightMgr.getLayerPolygonLimitIssues layerNames _MAX_ALLOWED_POLYS
+			if (polygonLimitIssues.count > 0) do (
+				local errorReport = ::preflightMgr.formatIssues polygonLimitIssues title: "Polygon preflight failed. Conversion stopped."
+				local shortError = "Layer polygon limit exceeded. Conversion stopped. Check conversion log for details."
+				postProcessLog errorReport
+				return failCurrentProcess slug source_original_name shortError statusCaption: "Layer polygon limit exceeded. Skipping file."
 			)
 
 			r.del = undefined
@@ -5489,9 +5838,12 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			local sceneStat = getGeometryPolyStats (geometry as array) label: "Whole scene"
 			postProcessLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
 			postProcessLog ("Scene polygon count: " + (formatPolyStats sceneStat))
-			if (sceneStat[2] > _MAX_ALLOWED_POLYS) do (
-				local m = "The polygon count exceeds the allowed limit. Limit: " + (_MAX_ALLOWED_POLYS as string) + ". Scene polygons: " + (sceneStat[2] as string) + "."
-				return failCurrentProcess slug source_original_name m statusCaption: "Polygon limit exceeded. Skipping file."
+			local polygonLimitIssue = ::preflightMgr.getScenePolygonLimitIssue (geometry as array) _MAX_ALLOWED_POLYS label: "Whole scene"
+			if (polygonLimitIssue != undefined) do (
+				local errorReport = ::preflightMgr.formatIssues #(polygonLimitIssue) title: "Polygon preflight failed. Conversion stopped."
+				local shortError = "Scene polygon limit exceeded. Conversion stopped. Check conversion log for details."
+				postProcessLog errorReport
+				return failCurrentProcess slug source_original_name shortError statusCaption: "Polygon limit exceeded. Skipping file."
 			)
 
 			convertSceneVariant r (outputBaseName + "-GLB") (outputBaseName + "-BLEND") (outputBaseName + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles
@@ -5553,7 +5905,10 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			postProcessLog ("Result JSON: " + result_json)
 
 			try (watchdogMgr.beat stage: "posting_result") catch()
-			requestMgr.postStatus #success txt: successMessage result_json: result_json
+			local successStatusText = successMessage
+			local warningsText = getProcessWarningsText()
+			if (warningsText != "") do successStatusText += "\n\nWarnings:\n" + warningsText
+			requestMgr.postStatus #success txt: successStatusText result_json: result_json
 			markProcessedFileInSession()
 			sendProcessingTelegramReport true slug source_original_name expectedExitFiles uploadedFiles failedFiles result_json
 			watchdogMgr.clear()
@@ -6218,6 +6573,26 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 			return false
 		)
 
+		local preflightIssues = ::preflightMgr.getSceneIssues()
+		local preflightErrors = preflightIssues[1]
+		local preflightWarnings = preflightIssues[2]
+
+		if (preflightWarnings.count > 0) do (
+			local warningReport = ::preflightMgr.formatIssues preflightWarnings title: "[Warning] Scene preflight warnings:"
+			print warningReport
+			debugLog "[Warning] Scene preflight warnings were found. Check Listener for details."
+		)
+
+		if (preflightErrors.count > 0) do (
+			local errorReport = ::preflightMgr.formatIssues preflightErrors title: "Unsupported scene features detected. Conversion stopped."
+			print errorReport
+			debugLog "Unsupported scene features detected. Debug conversion stopped."
+			SetQuietMode false
+			restoreDebugSourceScene sourceSceneFile
+			messageBox "Unsupported scene features detected. Debug conversion stopped. Check Listener for details." title: "Debug"
+			return false
+		)
+
 		local layerNames = ::_rGCAutoGLBConverter_Main.getGeometryLayerNames()
 		local splitByLayers = layerNames.count > 1
 
@@ -6228,9 +6603,10 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 				debugLog ("Layer polygon count: " + (::_rGCAutoGLBConverter_Main.formatPolyStats stat))
 			)
 
-			local failedLayerStats = ::_rGCAutoGLBConverter_Main.getLayersOverPolyLimit layerNames
-			if (failedLayerStats.count > 0) do (
-				local m = "Layer polygon limit exceeded. Limit per layer: " + (_MAX_ALLOWED_POLYS as string) + ". Failed layers: " + (::_rGCAutoGLBConverter_Main.formatPolyStatsList failedLayerStats) + "."
+			local polygonLimitIssues = ::preflightMgr.getLayerPolygonLimitIssues layerNames _MAX_ALLOWED_POLYS
+			if (polygonLimitIssues.count > 0) do (
+				local m = ::preflightMgr.formatIssues polygonLimitIssues title: "Polygon preflight failed. Debug conversion stopped."
+				print m
 				SetQuietMode false
 				restoreDebugSourceScene sourceSceneFile
 				messageBox m title: "Debug"
@@ -6264,8 +6640,10 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 			local sceneStat = ::_rGCAutoGLBConverter_Main.getGeometryPolyStats (geometry as array) label: "Whole scene"
 			debugLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
 			debugLog ("Scene polygon count: " + (::_rGCAutoGLBConverter_Main.formatPolyStats sceneStat))
-			if (sceneStat[2] > _MAX_ALLOWED_POLYS) do (
-				local m = "The polygon count exceeds the allowed limit. Limit: " + (_MAX_ALLOWED_POLYS as string) + ". Scene polygons: " + (sceneStat[2] as string) + "."
+			local polygonLimitIssue = ::preflightMgr.getScenePolygonLimitIssue (geometry as array) _MAX_ALLOWED_POLYS label: "Whole scene"
+			if (polygonLimitIssue != undefined) do (
+				local m = ::preflightMgr.formatIssues #(polygonLimitIssue) title: "Polygon preflight failed. Debug conversion stopped."
+				print m
 				SetQuietMode false
 				restoreDebugSourceScene sourceSceneFile
 				messageBox m title: "Debug"
