@@ -38,6 +38,36 @@ if (isUploaded) then (
 )
 ```
 
+## Data Bundles And Structs
+
+- When several values describe one logical runtime object, pass them as a small named `struct` instead of passing many separate arguments.
+- Prefer a structure for grouped data such as file metadata, options, processing results, or validation details.
+- Name fields by meaning, for example `filename`, `options`, `val`, `errors`, `warnings`, `isSuccess`.
+- Keep these structs focused on data. Do not turn a temporary data bundle into a manager unless it owns behavior.
+- Use named struct arguments or explicit field assignment so call sites stay readable.
+- Keep temporary data structs close to the code that owns them. If a data struct is only used by one wrapper/factory, define it inside that wrapper/factory instead of adding another global type at the top of the file.
+- Prefer passing one readable data struct through several functions over passing parallel arrays or relying on array indexes such as `item[1]`, `item[2]`, `item[3]`.
+- `tmp` is acceptable only as a short-lived local variable; the struct type itself should have a meaningful name.
+
+Example:
+
+```maxscript
+struct TempProcessData (
+	filename,
+	options,
+	val
+)
+
+local tmp = TempProcessData filename: file options: processOptions val: initialValue
+local result = processFile tmp
+```
+
+Avoid:
+
+```maxscript
+local result = processFile file processOptions initialValue
+```
+
 ## Loops
 
 - Use `for i in 1 to count do (...)` style for numeric ranges.

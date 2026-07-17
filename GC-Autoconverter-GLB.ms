@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.2.1
+VERSION=1.3.0
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -108,6 +108,13 @@ Auto Converter to GLB/SKP/BLEND script=
 + Added: Scene preflight validation for unsupported Corona, V-Ray, Hair/Fur, OSL and Real-World Scale Mapping features=
 + Improved: Polygon limit failures now use detailed preflight diagnostics with reason and fix hints=
 + Improved: Successful status text now includes collected warning messages when conversion finishes with warnings=
+
+[1.3.0]
++ Added: Optional Auto Split Variants for dirty scenes without prepared layers=
++ Improved: Automatic variant split can detect matching object-level variants by polycount and bounding box=
++ Improved: Working Path is cleaned before each queue item while extracted source folders remain available until the next queue item=
++ Improved: Duplicate queue items already completed in the current 3ds Max session are skipped locally=
++ Added: 3ds Max restart after 30 consecutive empty queue checks=
 
 [FILES]
 Install.mcr=
@@ -3101,6 +3108,608 @@ struct PreflightWrapper (
 	)
 )
 
+struct VariantSplitWrapper (
+	fallbackThreshold = 5.0,
+	minThreshold = 2.0,
+	sceneThresholdRatio = 0.03,
+	objectDiagonalRatio = 0.08,
+	nearestGapRatio = 0.45,
+	dimensionTolerance = 0.35,
+	volumeTolerance = 0.55,
+	polyTolerance = 0.65,
+	objectLevelMaxNodes = 10,
+	objectLevelDimensionTolerance = 0.12,
+
+	fn makeResult = (
+		struct VariantSplitResultData (
+			isAccepted,
+			isAmbiguous,
+			clusters,
+			warnings,
+			technicalLogs,
+			threshold
+		)
+
+		local result = VariantSplitResultData()
+		result.isAccepted = false
+		result.isAmbiguous = false
+		result.clusters = #()
+		result.warnings = #()
+		result.technicalLogs = #()
+		result.threshold = fallbackThreshold
+		return result
+	),
+
+	fn logTechnical result txt = (
+		append result.technicalLogs ("[Info] " + txt)
+		return result
+	),
+
+	fn logWarning result txt = (
+		append result.warnings ("[Warning] " + txt)
+		return result
+	),
+
+	fn isValidGeometryNode nodeValue = (
+		if (nodeValue == undefined) do return false
+		if (not isValidNode nodeValue) do return false
+		if (isDeleted nodeValue) do return false
+		local isGeometryNode = try (findItem (geometry as array) nodeValue > 0) catch (false)
+		if (not isGeometryNode) do return false
+		local canConvert = try (canConvertTo nodeValue Editable_mesh) catch (false)
+		if (not canConvert) do return false
+		return true
+	),
+
+	fn collectGeometryNodes = (
+		local nodes = #()
+		for nodeValue in geometry where (this.isValidGeometryNode nodeValue) do append nodes nodeValue
+		return nodes
+	),
+
+	fn getNodeNames nodes = (
+		local names = #()
+		for nodeValue in nodes where nodeValue != undefined do append names (nodeValue.name as string)
+		return names
+	),
+
+	fn getNodeVariantId nodeValue = (
+		local variantId = ""
+		try (variantId = getUserProp nodeValue "GCAutoVariantSplitId") catch (variantId = "")
+		if (variantId == undefined) do variantId = ""
+		return (variantId as string)
+	),
+
+	fn setNodeVariantId nodeValue variantId = (
+		if (nodeValue == undefined) do return false
+		try (
+			setUserProp nodeValue "GCAutoVariantSplitId" variantId
+			return true
+		) catch (
+			return false
+		)
+	),
+
+	fn assignVariantIds nodes = (
+		local index = 0
+		for nodeValue in nodes do (
+			index += 1
+			local variantId = "avs_" + (index as string)
+			this.setNodeVariantId nodeValue variantId
+		)
+		return true
+	),
+
+	fn getNodeIds nodes = (
+		local ids = #()
+		for nodeValue in nodes where nodeValue != undefined do append ids (this.getNodeVariantId nodeValue)
+		return ids
+	),
+
+	fn getBoundsMin nodes = (
+		local minPoint = [0, 0, 0]
+		if (nodes.count == 0) do return minPoint
+		minPoint = nodes[1].min
+		for nodeValue in nodes do (
+			minPoint.x = this.minNumber minPoint.x nodeValue.min.x
+			minPoint.y = this.minNumber minPoint.y nodeValue.min.y
+			minPoint.z = this.minNumber minPoint.z nodeValue.min.z
+		)
+		return minPoint
+	),
+
+	fn getBoundsMax nodes = (
+		local maxPoint = [0, 0, 0]
+		if (nodes.count == 0) do return maxPoint
+		maxPoint = nodes[1].max
+		for nodeValue in nodes do (
+			maxPoint.x = this.maxNumber maxPoint.x nodeValue.max.x
+			maxPoint.y = this.maxNumber maxPoint.y nodeValue.max.y
+			maxPoint.z = this.maxNumber maxPoint.z nodeValue.max.z
+		)
+		return maxPoint
+	),
+
+	fn getPointDistance a b = (
+		local d = b - a
+		return (sqrt ((d.x * d.x) + (d.y * d.y) + (d.z * d.z)))
+	),
+
+	fn minNumber a b = (
+		if (a < b) then (
+			return a
+		) else (
+			return b
+		)
+	),
+
+	fn maxNumber a b = (
+		if (a > b) then (
+			return a
+		) else (
+			return b
+		)
+	),
+
+	fn getNodeDiagonal nodeValue = (
+		return this.getPointDistance nodeValue.min nodeValue.max
+	),
+
+	fn getBoundsDistance a b = (
+		local dx = 0.0
+		local dy = 0.0
+		local dz = 0.0
+
+		if (a.max.x < b.min.x) then (
+			dx = b.min.x - a.max.x
+		) else if (b.max.x < a.min.x) then (
+			dx = a.min.x - b.max.x
+		)
+
+		if (a.max.y < b.min.y) then (
+			dy = b.min.y - a.max.y
+		) else if (b.max.y < a.min.y) then (
+			dy = a.min.y - b.max.y
+		)
+
+		if (a.max.z < b.min.z) then (
+			dz = b.min.z - a.max.z
+		) else if (b.max.z < a.min.z) then (
+			dz = a.min.z - b.max.z
+		)
+
+		return (sqrt ((dx * dx) + (dy * dy) + (dz * dz)))
+	),
+
+	fn medianNumber values fallback: 0.0 = (
+		if (values.count == 0) do return fallback
+		sort values
+		local midIndex = ((values.count + 1) / 2) as integer
+		if (mod values.count 2 == 1) do return values[midIndex]
+		local leftIndex = values.count / 2
+		local rightIndex = leftIndex + 1
+		return ((values[leftIndex] + values[rightIndex]) / 2.0)
+	),
+
+	fn calculateThreshold nodes result = (
+		if (nodes.count < 2) do (
+			this.logTechnical result ("Dynamic variant threshold was not calculated because there are fewer than 2 geometry objects. Using fallback " + (fallbackThreshold as string) + ".")
+			return fallbackThreshold
+		)
+
+		local sceneMin = this.getBoundsMin nodes
+		local sceneMax = this.getBoundsMax nodes
+		local sceneDiagonal = this.getPointDistance sceneMin sceneMax
+		local objectDiagonals = #()
+		local nearestGaps = #()
+
+		for nodeValue in nodes do append objectDiagonals (this.getNodeDiagonal nodeValue)
+
+		for i in 1 to nodes.count do (
+			local nearestGap = undefined
+			local a = nodes[i]
+			for j in 1 to nodes.count where i != j do (
+				local b = nodes[j]
+				local gap = this.getBoundsDistance a b
+				if (nearestGap == undefined or gap < nearestGap) do nearestGap = gap
+			)
+			if (nearestGap != undefined) do append nearestGaps nearestGap
+		)
+
+		local medianObjectDiagonal = this.medianNumber objectDiagonals fallback: 0.0
+		local medianNearestGap = this.medianNumber nearestGaps fallback: 0.0
+		if (sceneDiagonal <= 0.0 or medianObjectDiagonal <= 0.0) do (
+			this.logTechnical result ("Dynamic variant threshold could not be calculated. Using fallback " + (fallbackThreshold as string) + ".")
+			return fallbackThreshold
+		)
+
+		local baseThreshold = medianObjectDiagonal * objectDiagonalRatio
+		local gapThreshold = medianNearestGap * nearestGapRatio
+		local sceneCap = sceneDiagonal * sceneThresholdRatio
+		local threshold = this.maxNumber baseThreshold gapThreshold
+		threshold = this.maxNumber threshold minThreshold
+		if (sceneCap > 0.0) do threshold = this.minNumber threshold sceneCap
+		threshold = this.minNumber threshold fallbackThreshold
+		if (threshold <= 0.0) do threshold = fallbackThreshold
+
+		this.logTechnical result ("Auto Split threshold: sceneDiagonal=" + (sceneDiagonal as string) + ", medianObjectDiagonal=" + (medianObjectDiagonal as string) + ", medianNearestGap=" + (medianNearestGap as string) + ", threshold=" + (threshold as string))
+		return threshold
+	),
+
+	fn buildAdjacency nodes threshold = (
+		local adjacency = for i in 1 to nodes.count collect #()
+
+		for i in 1 to nodes.count do (
+			if (i < nodes.count) do (
+				local startIndex = i + 1
+				for j in startIndex to nodes.count do (
+					local gap = this.getBoundsDistance nodes[i] nodes[j]
+					if (gap <= threshold) do (
+						append adjacency[i] j
+						append adjacency[j] i
+					)
+				)
+			)
+		)
+
+		return adjacency
+	),
+
+	fn getNodePolyCount nodeValue = (
+		local polyCount = 0
+		try (
+			local counts = getPolygonCount nodeValue
+			polyCount = counts[1]
+		) catch (polyCount = 0)
+		return polyCount
+	),
+
+	fn getNodesPolyCount nodes = (
+		local polyCount = 0
+		for nodeValue in nodes do polyCount += this.getNodePolyCount nodeValue
+		return polyCount
+	),
+
+	fn getAnchorNode nodes = (
+		local anchor = undefined
+		local bestScore = -1.0
+
+		for nodeValue in nodes do (
+			local nodeSize = nodeValue.max - nodeValue.min
+			local volume = (abs nodeSize.x) * (abs nodeSize.y) * (abs nodeSize.z)
+			local score = volume + ((this.getNodePolyCount nodeValue) as float)
+			if (anchor == undefined or score > bestScore) do (
+				anchor = nodeValue
+				bestScore = score
+			)
+		)
+
+		return anchor
+	),
+
+	fn makeCluster index nodes = (
+		struct VariantSplitClusterData (
+			index,
+			nodes,
+			nodeIds,
+			nodeNames,
+			anchorId,
+			anchorName,
+			minPoint,
+			maxPoint,
+			size,
+			diagonal,
+			volume,
+			polyCount,
+			objectCount
+		)
+
+		local cluster = VariantSplitClusterData()
+		cluster.index = index
+		cluster.nodes = nodes
+		cluster.nodeIds = this.getNodeIds nodes
+		cluster.nodeNames = this.getNodeNames nodes
+		local anchor = this.getAnchorNode nodes
+		cluster.anchorId = if (anchor != undefined) then (this.getNodeVariantId anchor) else ""
+		cluster.anchorName = if (anchor != undefined) then (anchor.name as string) else ""
+		cluster.minPoint = this.getBoundsMin nodes
+		cluster.maxPoint = this.getBoundsMax nodes
+		cluster.size = cluster.maxPoint - cluster.minPoint
+		cluster.diagonal = this.getPointDistance cluster.minPoint cluster.maxPoint
+		cluster.volume = (abs cluster.size.x) * (abs cluster.size.y) * (abs cluster.size.z)
+		cluster.polyCount = this.getNodesPolyCount nodes
+		cluster.objectCount = nodes.count
+		return cluster
+	),
+
+	fn buildClusters nodes threshold = (
+		local clusters = #()
+		local adjacency = this.buildAdjacency nodes threshold
+		local visited = for i in 1 to nodes.count collect false
+		local clusterIndex = 0
+
+		for i in 1 to nodes.count where not visited[i] do (
+			clusterIndex += 1
+			local queue = #(i)
+			local queueIndex = 1
+			local clusterNodes = #()
+			visited[i] = true
+
+			while queueIndex <= queue.count do (
+				local currentIndex = queue[queueIndex]
+				queueIndex += 1
+				append clusterNodes nodes[currentIndex]
+
+				for neighborIndex in adjacency[currentIndex] do (
+					if (not visited[neighborIndex]) do (
+						visited[neighborIndex] = true
+						append queue neighborIndex
+					)
+				)
+			)
+
+			append clusters (this.makeCluster clusterIndex clusterNodes)
+		)
+
+		return clusters
+	),
+
+	fn buildSingleNodeClusters nodes = (
+		local clusters = #()
+		local clusterIndex = 0
+
+		for nodeValue in nodes do (
+			clusterIndex += 1
+			append clusters (this.makeCluster clusterIndex #(nodeValue))
+		)
+
+		return clusters
+	),
+
+	fn ratioClose a b tolerance = (
+		if (a == 0 and b == 0) do return true
+		if (a == 0 or b == 0) do return false
+		local ratio = (abs (a - b)) / (this.maxNumber (abs a) (abs b))
+		return ratio <= tolerance
+	),
+
+	fn getSortedSizeValues sizeValue = (
+		local values = #(abs sizeValue.x, abs sizeValue.y, abs sizeValue.z)
+		sort values
+		return values
+	),
+
+	fn areClustersSimilar a b = (
+		local sizeA = this.getSortedSizeValues a.size
+		local sizeB = this.getSortedSizeValues b.size
+		local isSizeSimilar = (this.ratioClose sizeA[1] sizeB[1] dimensionTolerance) and (this.ratioClose sizeA[2] sizeB[2] dimensionTolerance) and (this.ratioClose sizeA[3] sizeB[3] dimensionTolerance)
+		local isVolumeSimilar = this.ratioClose a.volume b.volume volumeTolerance
+		local isPolySimilar = this.ratioClose (a.polyCount as float) (b.polyCount as float) polyTolerance
+		local isObjectCountSimilar = a.objectCount == b.objectCount
+		local isExactPolyMatch = (a.polyCount == b.polyCount) and (a.polyCount > 0)
+		local isDiagonalSimilar = this.ratioClose a.diagonal b.diagonal dimensionTolerance
+
+		if (isObjectCountSimilar and isExactPolyMatch and isDiagonalSimilar) do return true
+		return (isSizeSimilar and isVolumeSimilar and isPolySimilar and isObjectCountSimilar)
+	),
+
+	fn areObjectLevelClustersSimilar a b = (
+		if (a.objectCount != 1) do return false
+		if (b.objectCount != 1) do return false
+		if (a.polyCount != b.polyCount) do return false
+		if (a.polyCount <= 0) do return false
+
+		local sizeA = this.getSortedSizeValues a.size
+		local sizeB = this.getSortedSizeValues b.size
+		local isSizeSimilar = (this.ratioClose sizeA[1] sizeB[1] objectLevelDimensionTolerance) and (this.ratioClose sizeA[2] sizeB[2] objectLevelDimensionTolerance) and (this.ratioClose sizeA[3] sizeB[3] objectLevelDimensionTolerance)
+		if (not isSizeSimilar) do return false
+		return true
+	),
+
+	fn tryObjectLevelSplit nodes result = (
+		if (nodes.count < 2) do return false
+		if (nodes.count > objectLevelMaxNodes) do (
+			this.logTechnical result ("Object-level variant split skipped: geometry objects=" + (nodes.count as string) + ", max=" + (objectLevelMaxNodes as string) + ".")
+			return false
+		)
+
+		local clusters = this.buildSingleNodeClusters nodes
+		if (clusters.count != nodes.count) do return false
+		for cluster in clusters do (
+			if (cluster.diagonal <= 0.0) do return false
+		)
+
+		local referenceCluster = clusters[1]
+		for i in 2 to clusters.count do (
+			if (not (this.areObjectLevelClustersSimilar referenceCluster clusters[i])) do (
+				this.logTechnical result ("Object-level variant split rejected: object " + (i as string) + " does not match polycount/bbox.")
+				return false
+			)
+		)
+
+		result.clusters = clusters
+		result.isAccepted = true
+		this.logTechnical result ("Auto Split accepted by object-level polycount/bbox match: " + (clusters.count as string) + " variants.")
+		return true
+	),
+
+	fn filterMeaningfulClusters clusters = (
+		local result = #()
+		for cluster in clusters where cluster.objectCount > 0 and cluster.diagonal > 0.0 do append result cluster
+		return result
+	),
+
+	fn isConfidentSplit clusters result = (
+		if (clusters.count < 2) do (
+			this.logTechnical result ("Auto Split found " + (clusters.count as string) + " cluster(s). Variant split is not needed.")
+			return false
+		)
+
+		local referenceCluster = clusters[1]
+		local similarCount = 1
+		for i in 2 to clusters.count do (
+			if (this.areClustersSimilar referenceCluster clusters[i]) do similarCount += 1
+		)
+
+		if (similarCount == clusters.count) do return true
+
+		result.isAmbiguous = true
+		this.logWarning result "Ambiguous automatic variant split. Converting whole scene."
+		this.logTechnical result ("Auto Split rejected: similar clusters=" + (similarCount as string) + " of " + (clusters.count as string) + ".")
+		return false
+	),
+
+	fn describeCluster cluster = (
+		local text = "Cluster " + (cluster.index as string)
+		text += ": anchor=" + cluster.anchorName
+		text += ", objects=" + (cluster.objectCount as string)
+		text += ", polys=" + (cluster.polyCount as string)
+		text += ", size=[" + (cluster.size.x as string) + ", " + (cluster.size.y as string) + ", " + (cluster.size.z as string) + "]"
+		text += ", volume=" + (cluster.volume as string)
+		return text
+	),
+
+	fn detect = (
+		local result = this.makeResult()
+		try (::_rGCAutoGLBConverter_Main.explodeAllGroups()) catch()
+		try (::API_BATCH_GLB_CONVERTER.deleteSpheres()) catch()
+
+		local nodes = this.collectGeometryNodes()
+		this.logTechnical result ("Auto Split valid geometry objects: " + (nodes.count as string))
+		if (nodes.count < 2) do return result
+		this.assignVariantIds nodes
+
+		if (this.tryObjectLevelSplit nodes result) do return result
+
+		local threshold = this.calculateThreshold nodes result
+		result.threshold = threshold
+		local clusters = this.filterMeaningfulClusters (this.buildClusters nodes threshold)
+		result.clusters = clusters
+
+		this.logTechnical result ("Auto Split clusters found: " + (clusters.count as string))
+		for cluster in clusters do this.logTechnical result (this.describeCluster cluster)
+
+		if (clusters.count < 2 and nodes.count > 1) do (
+			local singleNodeClusters = this.filterMeaningfulClusters (this.buildSingleNodeClusters nodes)
+			if (this.isConfidentSplit singleNodeClusters result) then (
+				clusters = singleNodeClusters
+				result.clusters = clusters
+				result.isAmbiguous = false
+				result.warnings = #()
+				this.logTechnical result "Auto Split switched to single-object variant detection because spatial clustering produced fewer than 2 clusters."
+				for cluster in clusters do this.logTechnical result (this.describeCluster cluster)
+			)
+		)
+
+		if (this.isConfidentSplit clusters result) do (
+			result.isAccepted = true
+			this.logTechnical result ("Auto Split accepted: " + (clusters.count as string) + " variants.")
+		)
+
+		return result
+	),
+
+	fn getNodesByNames nodeNames = (
+		local nodes = #()
+
+		for nodeName in nodeNames do (
+			local nodeValue = getNodeByName nodeName
+			if (this.isValidGeometryNode nodeValue) do append nodes nodeValue
+		)
+
+		return nodes
+	),
+
+	fn getNodesByIds nodeIds = (
+		local nodes = #()
+
+		for nodeValue in geometry where (this.isValidGeometryNode nodeValue) do (
+			local variantId = this.getNodeVariantId nodeValue
+			if ((findItem nodeIds variantId) > 0) do append nodes nodeValue
+		)
+
+		return nodes
+	),
+
+	fn getOrCreateLayer layerName = (
+		local layer = undefined
+		try (layer = LayerManager.getLayerFromName layerName) catch (layer = undefined)
+		if (layer == undefined) do (
+			try (layer = LayerManager.newLayerFromName layerName) catch (layer = undefined)
+		)
+		return layer
+	),
+
+	fn addNodeToLayer nodeValue layer = (
+		if (nodeValue == undefined) do return false
+		if (layer == undefined) do return false
+		try (
+			layer.addNode nodeValue
+			return true
+		) catch (
+			try (
+				nodeValue.layer = layer
+				return true
+			) catch (
+				return false
+			)
+		)
+	),
+
+	fn createVariantLayers result prefix: "AUTO-VARIANT" = (
+		local layerNames = #()
+
+		for cluster in result.clusters do (
+			local layerName = prefix + "-" + (cluster.index as string)
+			local layer = this.getOrCreateLayer layerName
+			if (layer != undefined) then (
+				local nodes = this.getNodesByIds cluster.nodeIds
+				for nodeValue in nodes do this.addNodeToLayer nodeValue layer
+				append layerNames layerName
+				this.logTechnical result ("Auto Split layer created: " + layerName + ", objects=" + (nodes.count as string))
+			) else (
+				this.logWarning result ("Automatic variant layer could not be created: " + layerName + ". Converting whole scene.")
+			)
+		)
+
+		return layerNames
+	),
+
+	fn keepOnlyCluster cluster = (
+		local keepIds = cluster.nodeIds
+		local nodesToDelete = #()
+
+		for nodeValue in geometry where ((isValidNode nodeValue) and (not isDeleted nodeValue)) do (
+			local variantId = this.getNodeVariantId nodeValue
+			if ((findItem keepIds variantId) == 0) do append nodesToDelete nodeValue
+		)
+
+		if (nodesToDelete.count > 0) do try (delete nodesToDelete) catch()
+		return (this.getNodesByIds keepIds).count
+	),
+
+	fn attachClusterToAnchor cluster = (
+		local nodes = this.getNodesByIds cluster.nodeIds
+		if (nodes.count < 2) do return nodes.count
+
+		local anchor = undefined
+		for nodeValue in nodes where (this.getNodeVariantId nodeValue == cluster.anchorId) do anchor = nodeValue
+		if (not (this.isValidGeometryNode anchor)) do anchor = this.getAnchorNode nodes
+		if (anchor == undefined) do return nodes.count
+
+		try (convertToPoly anchor) catch()
+		anchor.parent = undefined
+
+		for nodeValue in nodes where ((nodeValue != anchor) and (this.isValidGeometryNode nodeValue)) do (
+			try (convertToPoly nodeValue) catch()
+			nodeValue.parent = undefined
+			try (polyop.attach anchor nodeValue) catch()
+		)
+
+		return (geometry as array).count
+	)
+)
+
 struct BatchGLBConverterWrapper (
 	selfPath = getFilenamePath (getThisScriptFilename()),
 	texturesQueueNames = #(),
@@ -4383,8 +4992,12 @@ struct BatchGLBConverterWrapper (
 	),
 
 	fn rmDir d = (
+		if (d == undefined) do return false
+		if (d == false) do return false
+		if ((d as string) == "") do return false
 		local cmd = "timeout /t 5 /nobreak & rmdir /S /Q \"" + d + "\""
 		HiddenDOSCommand cmd donotwait: true
+		return true
 	),
 
 	fn saveGLBScene = (
@@ -4678,7 +5291,7 @@ struct BatchGLBConverterWrapper (
 		try (watchdogMgr.beat stage: "save_glb_scene") catch()
 		this.saveGLBScene()
 
-		if (scn.del != undefined) do (
+		if (scn.del != undefined and scn.del != false) do (
 			try (watchdogMgr.beat stage: "cleanup_source_temp") catch()
 			rmDir scn.del
 		)
@@ -4804,7 +5417,7 @@ struct BatchGLBConverterWrapper (
 		extractZip f o
 
 		r.type = #zip
-		r.del = o
+		r.del = false
 
 		local m = getMaxFile o
 
@@ -4835,6 +5448,7 @@ struct BatchGLBConverterWrapper (
 
 global API_BATCH_GLB_CONVERTER = BatchGLBConverterWrapper()
 global preflightMgr = PreflightWrapper()
+global variantSplitMgr = VariantSplitWrapper()
 
 
 global _rGCAutoGLBConverter_Main = undefined
@@ -4901,6 +5515,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	global _MAX_ALLOWED_POLYS = 250000
 
 	local maxProcessFilesInSession = 20 --20 files in a row
+	local maxEmptyQueueChecksBeforeRestart = 30 --30 empty queue checks in a row
 	local onstartDelay = 20 --sec
 	local restartProgramInterval = 60
 	local restartReadQueue = 1 -- min !!!!! 5
@@ -4914,9 +5529,11 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	local countdownMaxRestart = 60 -- sec
 	local countdownQueueRestart = restartReadQueue
 	local processedFilesInSession = 0
+	local emptyQueueChecksInSession = 0
 	local apiQueueFailureCount = 0
 	local apiQueueTelegramAlertSent = false
 	local processTelegramLogs = #()
+	local completedQueueIdsInSession = #()
 
 	group "Working Path" (
 		edittext edtInputPath "" readonly: true across: 2 align: #left fieldwidth: 215 height: 22
@@ -5150,8 +5767,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		sysInfo.currentDir = curDir
 	)
 
-	fn schedule3dsMaxRestartAfterProcessedLimit = (
-		local msg = "Processed files limit reached (" + (processedFilesInSession as string) + " of " + (maxProcessFilesInSession as string) + "). Restarting 3ds Max..."
+	fn schedule3dsMaxRestart msg = (
 		print msg
 		requestMgr.postLog txt: msg
 
@@ -5165,6 +5781,16 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		tmrCounteRestart.active = false
 		tmrCounteRestart.active = true
+	)
+
+	fn schedule3dsMaxRestartAfterProcessedLimit = (
+		local msg = "Processed files limit reached (" + (processedFilesInSession as string) + " of " + (maxProcessFilesInSession as string) + "). Restarting 3ds Max..."
+		schedule3dsMaxRestart msg
+	)
+
+	fn schedule3dsMaxRestartAfterEmptyQueueLimit = (
+		local msg = "Queue was empty " + (emptyQueueChecksInSession as string) + " times in a row. Restarting 3ds Max..."
+		schedule3dsMaxRestart msg
 	)
 
 	fn getRemainingFilesInSession = (
@@ -5327,6 +5953,17 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		processTelegramLogs = #()
 	)
 
+	fn rememberCompletedQueueId aId = (
+		if (aId == undefined or aId == "") do return false
+		if ((findItem completedQueueIdsInSession (aId as string)) == 0) do append completedQueueIdsInSession (aId as string)
+		return true
+	)
+
+	fn isCompletedQueueId aId = (
+		if (aId == undefined or aId == "") do return false
+		return ((findItem completedQueueIdsInSession (aId as string)) > 0)
+	)
+
 	fn addProcessTelegramLog txt = (
 		if (txt == undefined) do txt = ""
 		append processTelegramLogs (txt as string)
@@ -5335,6 +5972,20 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	fn postProcessLog txt = (
 		addProcessTelegramLog txt
 		requestMgr.postLog txt: txt
+	)
+
+	fn implodeLines lines maxChars: 3500 = (
+		local result = ""
+
+		for line in lines do (
+			local nextLine = line as string
+			if ((result.count + nextLine.count + 1) > maxChars) do exit
+			if (result != "") do result += "\n"
+			result += nextLine
+		)
+
+		if (lines.count > 0 and result == "") do result = substring (lines[1] as string) 1 maxChars
+		return result
 	)
 
 	fn getProcessWarningsText maxChars: 2000 = (
@@ -5355,33 +6006,24 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		postProcessLog ("Processed files in this 3ds Max session: " + (processedFilesInSession as string) + " of " + (maxProcessFilesInSession as string) + ". Remaining before restart: " + ((getRemainingFilesInSession()) as string))
 	)
 
-	fn implodeLines lines maxChars: 3500 = (
-		local result = ""
-
-		for line in lines do (
-			local nextLine = line as string
-			if ((result.count + nextLine.count + 1) > maxChars) do exit
-			if (result != "") do result += "\n"
-			result += nextLine
-		)
-
-		if (lines.count > 0 and result == "") do result = substring (lines[1] as string) 1 maxChars
-		return result
-	)
-
-	fn findFirstGLBScreenshot expectedExitFiles = (
+	fn findGLBScreenshots expectedExitFiles = (
+		local images = #()
+		local fallbackImages = #()
 		local regex = dotNetClass "System.Text.RegularExpressions.Regex"
 
 		for f in expectedExitFiles do (
-			local name = toLower (getFilenameFile f)
-			if (toLower (getFilenameType f) == ".png" and regex.IsMatch name "-glb(-[0-9]+)?$" and doesFileExist f) do return f
+			if (toLower (getFilenameType f) == ".png" and doesFileExist f) do (
+				local name = toLower (getFilenameFile f)
+				if (regex.IsMatch name "-glb(-[0-9]+)?$") then (
+					append images f
+				) else (
+					append fallbackImages f
+				)
+			)
 		)
 
-		for f in expectedExitFiles do (
-			if (toLower (getFilenameType f) == ".png" and doesFileExist f) do return f
-		)
-
-		return ""
+		if (images.count > 0) do return images
+		return fallbackImages
 	)
 
 	fn sendProcessingTelegramReport isSuccess slug sourceName expectedExitFiles uploadedFiles failedFiles resultJson errorMessage: "" = (
@@ -5418,17 +6060,33 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		if (failedFiles.count > 0) do txt += "\nFailed:\n" + (shortenText (implodeString failedFiles) maxLen: 500) + "\n"
 		txt += "\nConversion log:\n" + (implodeLines processTelegramLogs maxChars: 2500)
 
-		local image = if (isSuccess) then (
-			findFirstGLBScreenshot expectedExitFiles
+		local images = #()
+		if (isSuccess) then (
+			images = findGLBScreenshots expectedExitFiles
 		) else (
-			(getFileNamePath (getThisScriptFileName())) + "error.jpg"
+			local errorImage = (getFileNamePath (getThisScriptFileName())) + "error.jpg"
+			if (doesFileExist errorImage) do append images errorImage
 		)
 
 		local isPhotoSent = true
 		local photoError = ""
-		if (image != "" and doesFileExist image) do (
-			isPhotoSent = telegramMgr.sendPhoto photoCaption image
-			if (not isPhotoSent) do photoError = telegramMgr.getLastError()
+		if (images.count > 0) do (
+			for i in 1 to images.count do (
+				local image = images[i]
+				local imageCaption = photoCaption
+				if (isSuccess and images.count > 1) do (
+					imageCaption += "\nGLB Screenshot: " + (i as string) + " of " + (images.count as string)
+					imageCaption += "\nFile: " + (filenameFromPath image)
+				)
+
+				local isCurrentPhotoSent = telegramMgr.sendPhoto imageCaption image
+				if (not isCurrentPhotoSent) do (
+					isPhotoSent = false
+					local currentPhotoError = telegramMgr.getLastError()
+					if (photoError != "") do photoError += "\n"
+					photoError += (filenameFromPath image) + ": " + currentPhotoError
+				)
+			)
 		)
 
 		local isMessageSent = telegramMgr.sendMessage txt
@@ -5452,6 +6110,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		postProcessLog errorMessage
 		try (watchdogMgr.beat stage: "posting_error") catch()
 		requestMgr.postStatus #error txt: message
+		rememberCompletedQueueId requestMgr.a_id
 		if (statusCaption == "") do statusCaption = message
 		lblStatus.caption = statusCaption
 
@@ -5508,6 +6167,36 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		return ::preflightMgr.getLayersOverPolyLimit layerNames _MAX_ALLOWED_POLYS
 	)
 
+	fn isAutoSplitVariantsEnabled = (
+		return try (::_rGCAutoGLBConverter_Settings.isAutoSplitVariantsEnabled()) catch (false)
+	)
+
+	fn logVariantSplitResult result postLogs: true = (
+		for technicalLog in result.technicalLogs do (
+			if (postLogs) then postProcessLog technicalLog else print technicalLog
+		)
+
+		for warningLog in result.warnings do (
+			if (postLogs) then postProcessLog warningLog else print warningLog
+		)
+
+		return true
+	)
+
+	fn getVariantPolygonLimitIssues clusters = (
+		local issues = #()
+
+		for cluster in clusters do (
+			if (cluster.polyCount > _MAX_ALLOWED_POLYS) do (
+				local stat = #("Auto variant " + (cluster.index as string), cluster.polyCount, 0, cluster.objectCount)
+				local issue = ::preflightMgr.makePolygonLimitIssue stat _MAX_ALLOWED_POLYS "Auto variant polygon limit exceeded"
+				::preflightMgr.appendUniqueIssue issues issue
+			)
+		)
+
+		return issues
+	)
+
 	fn keepOnlyGeometryFromLayer layerName = (
 		local nodesToDelete = #()
 
@@ -5550,6 +6239,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		attachSceneObjects()
 		setSnenePivotBottom()
 
+		local originalSceneName = scn.name
 		scn.name = glbName
 
 		join expectedExitFiles #(
@@ -5563,6 +6253,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		try (watchdogMgr.beat stage: "converting_glb") catch()
 		logMessage ("Converting to GLB: " + glbName) postLogs: postLogs
 		local glb = ::API_BATCH_GLB_CONVERTER.run scn: scn out: d ao: ao isNormalizeTiling: false
+		scn.name = originalSceneName
 
 		-- Convert to Blender
 		if (convertToBlend) do (
@@ -5665,9 +6356,18 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		-- Is Queue empty (Restart)
 		if (jr.getString "message" != "queue_item_received") do (
-			restartProcessFiles msg: "Queue is empty. Restarting in"
+			emptyQueueChecksInSession += 1
+			local emptyQueueMsg = "Queue is empty (" + (emptyQueueChecksInSession as string) + " of " + (maxEmptyQueueChecksBeforeRestart as string) + "). Restarting in"
+			print emptyQueueMsg
+			if (emptyQueueChecksInSession >= maxEmptyQueueChecksBeforeRestart) then (
+				schedule3dsMaxRestartAfterEmptyQueueLimit()
+			) else (
+				restartProcessFiles msg: emptyQueueMsg
+			)
 			return false
 		)
+
+		emptyQueueChecksInSession = 0
 
 		statusMessageRestartQueueIn dispose: true
 		statusMessageRestartMaxIn dispose: true
@@ -5690,6 +6390,16 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		requestMgr.version_id = version_id
 		requestMgr.slug = slug
 
+		if (isCompletedQueueId a_id) do (
+			local duplicateMsg = "[Warning] Backend returned an already completed queue item in this 3ds Max session. Skipping duplicate local processing. AID: " + (a_id as string) + ", slug: " + slug
+			print duplicateMsg
+			requestMgr.postLog txt: duplicateMsg
+			lblStatus.caption = "Duplicate completed queue item skipped."
+			statusMessageNextProcess create: true
+			tmrNextProcess.active = true
+			return false
+		)
+
 		postProcessLog "Updating status to In Progress..."
 		lblStatus.caption = "Updating status to In Progress..."
 
@@ -5706,15 +6416,17 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		lblStatus.caption = "Clearing working folder..."
 		try (watchdogMgr.beat stage: "clearing_working_folder") catch()
 		clearFolder d
+		postProcessLog ("Working folder cleared: " + d)
 
 		-- Download file
-		postProcessLog "Downloading source file..."
+		postProcessLog ("Downloading source file to: " + file)
 		lblStatus.caption = "Downloading source file..."
 		try (watchdogMgr.beat stage: "downloading_source") catch()
 
+		try (deleteFile file) catch()
 		downloadMgr.download download_url file
 
-		postProcessLog "Source file downloaded. Validating file..."
+		postProcessLog ("Source file downloaded. Validating file: " + file)
 		lblStatus.caption = "Validating downloaded file..."
 		try (watchdogMgr.beat stage: "validating_download") catch()
 
@@ -5766,6 +6478,13 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			return failCurrentProcess slug source_original_name "Cannot open scene file."
 		)
 
+		postProcessLog ("Opened source archive: " + r.file)
+		postProcessLog ("Opened source scene: " + (maxFilePath + maxFileName))
+		postProcessLog ("Source scene max name: " + (r.maxName as string))
+
+		postProcessLog "Removing sphere helper objects before scene checks..."
+		try (::API_BATCH_GLB_CONVERTER.deleteSpheres()) catch()
+
 		try (watchdogMgr.beat stage: "checking_unsupported_scene_features") catch()
 		local preflightIssues = ::preflightMgr.getSceneIssues()
 		local preflightErrors = preflightIssues[1]
@@ -5787,7 +6506,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local layerNames = getGeometryLayerNames()
 		local splitByLayers = layerNames.count > 1
 		local sourceSceneFile = maxFilePath + maxFileName
-		local sourceDeleteDir = r.del
+		local sourceDeleteDir = undefined
 		
 		if (splitByLayers and doesFileExist sourceSceneFile) then (
 			try (watchdogMgr.beat stage: "checking_layers") catch()
@@ -5803,7 +6522,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				return failCurrentProcess slug source_original_name shortError statusCaption: "Layer polygon limit exceeded. Skipping file."
 			)
 
-			r.del = undefined
+			r.del = false
 
 			for i in 1 to layerNames.count do (
 				local layerName = layerNames[i]
@@ -5834,19 +6553,79 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				postProcessLog "[Warning] Multiple layers were detected, but the source scene file could not be reloaded. Converting the whole scene."
 			)
 
-			try (watchdogMgr.beat stage: "checking_polygons") catch()
-			local sceneStat = getGeometryPolyStats (geometry as array) label: "Whole scene"
-			postProcessLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
-			postProcessLog ("Scene polygon count: " + (formatPolyStats sceneStat))
-			local polygonLimitIssue = ::preflightMgr.getScenePolygonLimitIssue (geometry as array) _MAX_ALLOWED_POLYS label: "Whole scene"
-			if (polygonLimitIssue != undefined) do (
-				local errorReport = ::preflightMgr.formatIssues #(polygonLimitIssue) title: "Polygon preflight failed. Conversion stopped."
-				local shortError = "Scene polygon limit exceeded. Conversion stopped. Check conversion log for details."
-				postProcessLog errorReport
-				return failCurrentProcess slug source_original_name shortError statusCaption: "Polygon limit exceeded. Skipping file."
+			local isAutoSplitConverted = false
+			if ((not splitByLayers) and isAutoSplitVariantsEnabled()) do (
+				try (watchdogMgr.beat stage: "auto_split_variants") catch()
+				postProcessLog "Layer split was not applied. Checking automatic variant split..."
+				local variantSplitResult = ::variantSplitMgr.detect()
+				logVariantSplitResult variantSplitResult postLogs: true
+
+				if (variantSplitResult.isAccepted) do (
+					local variantPolygonIssues = getVariantPolygonLimitIssues variantSplitResult.clusters
+					if (variantPolygonIssues.count > 0) do (
+						local errorReport = ::preflightMgr.formatIssues variantPolygonIssues title: "Variant polygon preflight failed. Conversion stopped."
+						local shortError = "Auto variant polygon limit exceeded. Conversion stopped. Check conversion log for details."
+						postProcessLog errorReport
+						return failCurrentProcess slug source_original_name shortError statusCaption: "Auto variant polygon limit exceeded. Skipping file."
+					)
+
+					local autoSplitSourceFile = d + (genGUID()) + "-auto-split.max"
+					local autoVariantLayerNames = ::variantSplitMgr.createVariantLayers variantSplitResult prefix: "AUTO-VARIANT"
+					postProcessLog ("Auto Split intermediate variant layers created: " + (autoVariantLayerNames.count as string))
+					try (saveMaxFile autoSplitSourceFile quiet: true) catch()
+
+					if ((doesFileExist autoSplitSourceFile) and (autoVariantLayerNames.count == variantSplitResult.clusters.count)) then (
+						r.del = false
+						for i in 1 to variantSplitResult.clusters.count do (
+							local cluster = variantSplitResult.clusters[i]
+							local layerName = autoVariantLayerNames[i]
+							local suffix = "-" + (i as string)
+							local glbName = outputBaseName + "-GLB" + suffix
+							local blendName = outputBaseName + "-BLEND" + suffix
+							local skpName = outputBaseName + "-SKP" + suffix
+
+							lblStatus.caption = "Loading auto variant " + (i as string) + " of " + (variantSplitResult.clusters.count as string) + "..."
+							postProcessLog ("Loading source scene for auto variant " + (i as string) + ": " + layerName)
+							try (watchdogMgr.beat stage: ("loading_auto_variant_" + (i as string))) catch()
+							loadMaxFile autoSplitSourceFile quiet: true
+							resetLoadedSceneState()
+
+							local objectsCount = keepOnlyGeometryFromLayer layerName
+							if (objectsCount == 0) then (
+								postProcessLog ("[Warning] Auto variant has no geometry after reload. Skipping variant " + (i as string) + ".")
+							) else (
+								local attachedObjectsCount = ::variantSplitMgr.attachClusterToAnchor cluster
+								postProcessLog ("Auto variant " + (i as string) + " attached to anchor: " + cluster.anchorName + ". Objects after attach: " + (attachedObjectsCount as string))
+								postProcessLog ("Converting auto variant " + (i as string) + " of " + (variantSplitResult.clusters.count as string) + ".")
+								try (watchdogMgr.beat stage: ("converting_auto_variant_" + (i as string))) catch()
+								convertSceneVariant r glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles
+							)
+						)
+
+						try (deleteFile autoSplitSourceFile) catch()
+						if (sourceDeleteDir != undefined) do ::API_BATCH_GLB_CONVERTER.rmDir sourceDeleteDir
+						isAutoSplitConverted = true
+					) else (
+						postProcessLog "[Warning] Automatic variant split was accepted, but the intermediate variant-layer scene could not be saved. Converting whole scene."
+					)
+				)
 			)
 
-			convertSceneVariant r (outputBaseName + "-GLB") (outputBaseName + "-BLEND") (outputBaseName + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles
+			if (not isAutoSplitConverted) do (
+				try (watchdogMgr.beat stage: "checking_polygons") catch()
+				local sceneStat = getGeometryPolyStats (geometry as array) label: "Whole scene"
+				postProcessLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
+				postProcessLog ("Scene polygon count: " + (formatPolyStats sceneStat))
+				local polygonLimitIssue = ::preflightMgr.getScenePolygonLimitIssue (geometry as array) _MAX_ALLOWED_POLYS label: "Whole scene"
+				if (polygonLimitIssue != undefined) do (
+					local errorReport = ::preflightMgr.formatIssues #(polygonLimitIssue) title: "Polygon preflight failed. Conversion stopped."
+					local shortError = "Scene polygon limit exceeded. Conversion stopped. Check conversion log for details."
+					postProcessLog errorReport
+					return failCurrentProcess slug source_original_name shortError statusCaption: "Polygon limit exceeded. Skipping file."
+				)
+
+				convertSceneVariant r (outputBaseName + "-GLB") (outputBaseName + "-BLEND") (outputBaseName + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles
+			)
 		)
 
 		try (watchdogMgr.beat stage: "collecting_outputs") catch()
@@ -5909,6 +6688,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			local warningsText = getProcessWarningsText()
 			if (warningsText != "") do successStatusText += "\n\nWarnings:\n" + warningsText
 			requestMgr.postStatus #success txt: successStatusText result_json: result_json
+			rememberCompletedQueueId a_id
 			markProcessedFileInSession()
 			sendProcessingTelegramReport true slug source_original_name expectedExitFiles uploadedFiles failedFiles result_json
 			watchdogMgr.clear()
@@ -5917,6 +6697,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			lblStatus.caption = "No files were uploaded."
 			try (watchdogMgr.beat stage: "posting_error") catch()
 			requestMgr.postStatus #error txt: m
+			rememberCompletedQueueId a_id
 			postProcessLog m
 			markProcessedFileInSession()
 			sendProcessingTelegramReport false slug source_original_name expectedExitFiles uploadedFiles failedFiles "" errorMessage: m
@@ -5994,6 +6775,8 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		if (v) then (
 			processedFilesInSession = 0
+			emptyQueueChecksInSession = 0
+			completedQueueIdsInSession = #()
 			updateRemainingFilesLabel()
 
 			local s = "try (fileIn @\"" + (getThisScriptFilename()) + "\") catch (print \"Error! Can't GC-Autoconverter-GLB.ms!\")"
@@ -6350,12 +7133,20 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 	)
 
 	group "AO Unwrap Method" (
-		spinner spnMaxUnwrapAOPolyLimit "Max. Unwrap poly limit:" range: [1, 999999999, 100000] type: #integer fieldwidth: 70 align: #left
+		spinner spnMaxUnwrapAOPolyLimit "3ds Max Unwrap poly limit:" range: [1, 999999999, 100000] type: #integer fieldwidth: 70 align: #left
 		radiobuttons rdoAOUnwrapMethod labels: #("3ds Max Unwrap", "Blender Unwrap") columns: 2 default: 1 align: #left
+	)
+
+	group "Variant Split" (
+		checkbox cbxAutoSplitVariants "Auto Split Variants"
 	)
 
 	group "Watchdog Settings" (
 		spinner spnWatchdogTimeoutMin "Stuck on operation timeout (min):" range: [1, 999, 15] type: #integer fieldwidth: 50 align: #left
+	)
+
+	fn isAutoSplitVariantsEnabled = (
+		return cbxAutoSplitVariants.checked
 	)
 
 	fn loadSettings = (
@@ -6375,6 +7166,8 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 		local unwrapMethod = '*'.get "aoUnwrapMethod"
 		rdoAOUnwrapMethod.state = if (unwrapMethod == "blender" or unwrapMethod == "uvatlas") then 2 else 1
 
+		cbxAutoSplitVariants.checked = '*'.get "cbxAutoSplitVariants" type: #bool_false
+
 		spnWatchdogTimeoutMin.value = watchdogMgr.getTimeoutMin()
 		watchdogMgr.saveTimeout()
 	)
@@ -6385,6 +7178,7 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 	on spnAOResolution changed v do '*'.add  "spnAOResolution" v
 	on spnMaxUnwrapAOPolyLimit changed v do '*'.add "spnMaxUnwrapAOPolyLimit" v
 	on cbxAODenoise changed v do '*'.add  "cbxAODenoise" v
+	on cbxAutoSplitVariants changed v do '*'.add "cbxAutoSplitVariants" v
 	on rdoAOUnwrapMethod changed state do (
 		local unwrapMethod = if (state == 2) then "blender" else "max"
 		'*'.add "aoUnwrapMethod" unwrapMethod
@@ -6573,6 +7367,9 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 			return false
 		)
 
+		debugLog "Removing sphere helper objects before scene checks..."
+		try (::API_BATCH_GLB_CONVERTER.deleteSpheres()) catch()
+
 		local preflightIssues = ::preflightMgr.getSceneIssues()
 		local preflightErrors = preflightIssues[1]
 		local preflightWarnings = preflightIssues[2]
@@ -6637,21 +7434,80 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 
 			try (saveConvertedCompareScene convertedSceneFile) catch ()
 		) else (
-			local sceneStat = ::_rGCAutoGLBConverter_Main.getGeometryPolyStats (geometry as array) label: "Whole scene"
-			debugLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
-			debugLog ("Scene polygon count: " + (::_rGCAutoGLBConverter_Main.formatPolyStats sceneStat))
-			local polygonLimitIssue = ::preflightMgr.getScenePolygonLimitIssue (geometry as array) _MAX_ALLOWED_POLYS label: "Whole scene"
-			if (polygonLimitIssue != undefined) do (
-				local m = ::preflightMgr.formatIssues #(polygonLimitIssue) title: "Polygon preflight failed. Debug conversion stopped."
-				print m
-				SetQuietMode false
-				restoreDebugSourceScene sourceSceneFile
-				messageBox m title: "Debug"
-				return false
+			local isAutoSplitConverted = false
+			if (::_rGCAutoGLBConverter_Main.isAutoSplitVariantsEnabled()) do (
+				debugLog "Layer split was not applied. Checking automatic variant split..."
+				local variantSplitResult = ::variantSplitMgr.detect()
+				::_rGCAutoGLBConverter_Main.logVariantSplitResult variantSplitResult postLogs: false
+
+				if (variantSplitResult.isAccepted) do (
+					local variantPolygonIssues = ::_rGCAutoGLBConverter_Main.getVariantPolygonLimitIssues variantSplitResult.clusters
+					if (variantPolygonIssues.count > 0) do (
+						local m = ::preflightMgr.formatIssues variantPolygonIssues title: "Variant polygon preflight failed. Debug conversion stopped."
+						print m
+						SetQuietMode false
+						restoreDebugSourceScene sourceSceneFile
+						messageBox m title: "Debug"
+						return false
+					)
+
+					local autoSplitSourceFile = d + sceneName + "-AUTO-SPLIT-WORKING.max"
+					local autoVariantLayerNames = ::variantSplitMgr.createVariantLayers variantSplitResult prefix: "AUTO-VARIANT"
+					debugLog ("Auto Split intermediate variant layers created: " + (autoVariantLayerNames.count as string))
+					try (deleteFile autoSplitSourceFile) catch()
+					try (saveMaxFile autoSplitSourceFile quiet: true) catch()
+
+					if ((doesFileExist autoSplitSourceFile) and (autoVariantLayerNames.count == variantSplitResult.clusters.count)) then (
+						for i in 1 to variantSplitResult.clusters.count do (
+							local cluster = variantSplitResult.clusters[i]
+							local layerName = autoVariantLayerNames[i]
+							local suffix = "-" + (i as string)
+							local glbName = sceneName + "-GLB" + suffix
+							local blendName = sceneName + "-BLEND" + suffix
+							local skpName = sceneName + "-SKP" + suffix
+							local variantCompareScene = d + glbName + ".max"
+
+							debugLog ("Loading source scene for auto variant " + (i as string) + ": " + layerName)
+							loadMaxFile autoSplitSourceFile quiet: true
+							::_rGCAutoGLBConverter_Main.resetLoadedSceneState()
+
+							local objectsCount = ::_rGCAutoGLBConverter_Main.keepOnlyGeometryFromLayer layerName
+							if (objectsCount == 0) then (
+								debugLog ("Auto variant has no geometry after reload. Skipping variant " + (i as string) + ".")
+							) else (
+								local attachedObjectsCount = ::variantSplitMgr.attachClusterToAnchor cluster
+								debugLog ("Auto variant " + (i as string) + " attached to anchor: " + cluster.anchorName + ". Objects after attach: " + (attachedObjectsCount as string))
+								debugLog ("Converting auto variant " + (i as string) + " of " + (variantSplitResult.clusters.count as string) + ".")
+								::_rGCAutoGLBConverter_Main.convertSceneVariant r glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles convertToBlend: cbxDebugConvertToBlend.checked convertToSketchup: cbxDebugConvertToSketchup.checked postLogs: false
+								if (saveConvertedCompareScene variantCompareScene) do append convertedSceneFiles variantCompareScene
+							)
+						)
+
+						try (deleteFile autoSplitSourceFile) catch()
+						isAutoSplitConverted = true
+					) else (
+						print "[Warning] Automatic variant split was accepted, but the intermediate variant-layer scene could not be saved. Converting whole scene."
+					)
+				)
 			)
 
-			::_rGCAutoGLBConverter_Main.convertSceneVariant r (sceneName + "-GLB") (sceneName + "-BLEND") (sceneName + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles convertToBlend: cbxDebugConvertToBlend.checked convertToSketchup: cbxDebugConvertToSketchup.checked postLogs: false
-			if (saveConvertedCompareScene convertedSceneFile) do append convertedSceneFiles convertedSceneFile
+			if (not isAutoSplitConverted) do (
+				local sceneStat = ::_rGCAutoGLBConverter_Main.getGeometryPolyStats (geometry as array) label: "Whole scene"
+				debugLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
+				debugLog ("Scene polygon count: " + (::_rGCAutoGLBConverter_Main.formatPolyStats sceneStat))
+				local polygonLimitIssue = ::preflightMgr.getScenePolygonLimitIssue (geometry as array) _MAX_ALLOWED_POLYS label: "Whole scene"
+				if (polygonLimitIssue != undefined) do (
+					local m = ::preflightMgr.formatIssues #(polygonLimitIssue) title: "Polygon preflight failed. Debug conversion stopped."
+					print m
+					SetQuietMode false
+					restoreDebugSourceScene sourceSceneFile
+					messageBox m title: "Debug"
+					return false
+				)
+
+				::_rGCAutoGLBConverter_Main.convertSceneVariant r (sceneName + "-GLB") (sceneName + "-BLEND") (sceneName + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles convertToBlend: cbxDebugConvertToBlend.checked convertToSketchup: cbxDebugConvertToSketchup.checked postLogs: false
+				if (saveConvertedCompareScene convertedSceneFile) do append convertedSceneFiles convertedSceneFile
+			)
 		)
 
 		local cntExistingFiles = ::_rGCAutoGLBConverter_Main.checkExistingFiles expectedExitFiles
@@ -6659,7 +7515,7 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 		updateDebugGLBList()
 		local m = "Debug conversion finished.\n\nOriginal scene:\n" + originalSceneFile + "\n\nConverted scene:\n" + convertedSceneFile + "\n\nConverted files found: " + (cntExistingFiles as string) + " of " + (expectedExitFiles.count as string) + "."
 		if (lastGLB != "") do m += "\n\nPreview GLB:\n" + lastGLB
-		if (convertedSceneFiles.count > 1) do m += "\n\nLayer compare scenes: " + (convertedSceneFiles.count as string)
+		if (convertedSceneFiles.count > 1) do m += "\n\nConverted compare scenes: " + (convertedSceneFiles.count as string)
 
 		SetQuietMode false
 		local isSourceSceneRestored = restoreDebugSourceScene sourceSceneFile
