@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.3.0
+VERSION=1.4.0
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -115,6 +115,14 @@ Auto Converter to GLB/SKP/BLEND script=
 + Improved: Working Path is cleaned before each queue item while extracted source folders remain available until the next queue item=
 + Improved: Duplicate queue items already completed in the current 3ds Max session are skipped locally=
 + Added: 3ds Max restart after 30 consecutive empty queue checks=
+
+[1.4.0]
++ Added: Configurable polygon limit for exported variants in Settings=
++ Improved: Empty-queue restart no longer starts a second 3ds Max instance when the desktop runner is active=
++ Improved: Repeated backend queue items are processed instead of being skipped locally=
++ Added: CoronaLightMtl conversion through CoronaPhysicalMtl self illumination=
++ Improved: CoronaPhysicalMtl self illumination is exported as GLTF emission even when only a self-illumination map is present=
++ Improved: Scene texture relink now force-resolves texture paths from the source scene folder and extracted archive subfolders=
 
 [FILES]
 Install.mcr=
@@ -4426,6 +4434,7 @@ struct BatchGLBConverterWrapper (
 
 			nm.emissionColor = i.color
 			nm.emissionMap = i.texmap
+			this.addTextureToQueue nm.emissionMap
 			if (i.opacityTexmap != undefined) do (
 				nm.AlphaMap = i.opacityTexmap
 				this.addTextureToQueue nm.AlphaMap
@@ -4436,10 +4445,89 @@ struct BatchGLBConverterWrapper (
 		)
 	),
 
+	fn getSafePropertyValue sourceObject propertyName fallbackValue = (
+		local propertyValue = fallbackValue
+		try (
+			if (isProperty sourceObject propertyName) do propertyValue = getProperty sourceObject propertyName
+		) catch (
+			propertyValue = fallbackValue
+		)
+
+		return propertyValue
+	),
+
+	fn setSafePropertyValue targetObject propertyName propertyValue = (
+		try (
+			if (isProperty targetObject propertyName) do (
+				setProperty targetObject propertyName propertyValue
+				return true
+			)
+		) catch (
+			return false
+		)
+
+		return false
+	),
+
+	fn getCoronaLightMtlIntensity lightMtl = (
+		local intensity = 1.0
+		local propertyNames = #(#intensity, #intensityMultiplier, #multiplier, #level)
+
+		for propertyName in propertyNames do (
+			local propertyValue = this.getSafePropertyValue lightMtl propertyName undefined
+			if (propertyValue != undefined) do (
+				intensity = try (propertyValue as float) catch (1.0)
+				exit
+			)
+		)
+
+		if (intensity <= 0.0) do intensity = 1.0
+		return intensity
+	),
+
+	fn coronaLightMtlToCoronaPhysicalMtl = (
+		for lightMtl in getClassInstances CoronaLightMtl do (
+			local physicalMtl = CoronaPhysicalMtl()
+			physicalMtl.name = lightMtl.name
+
+			local lightColor = this.getSafePropertyValue lightMtl #color white
+			local lightTexmap = this.getSafePropertyValue lightMtl #texmap undefined
+			local opacityTexmap = this.getSafePropertyValue lightMtl #opacityTexmap undefined
+			local intensity = this.getCoronaLightMtlIntensity lightMtl
+
+			this.setSafePropertyValue physicalMtl #baseColor lightColor
+			this.setSafePropertyValue physicalMtl #baseTexmap lightTexmap
+			this.setSafePropertyValue physicalMtl #baseLevel 1.0
+			this.setSafePropertyValue physicalMtl #selfIllumColor lightColor
+			this.setSafePropertyValue physicalMtl #selfIllumTexmap lightTexmap
+			this.setSafePropertyValue physicalMtl #selfIllumLevel intensity
+
+			if (opacityTexmap != undefined) do (
+				this.setSafePropertyValue physicalMtl #opacityTexmap opacityTexmap
+			)
+
+			replaceInstances lightMtl physicalMtl
+		)
+
+		return true
+	),
+
 	fn clampColor c = (
 		if (c == black) do return color 6 6 6
 		if (c == white) do return color 248 248 248
 		return c
+	),
+
+	fn scaleColor c multiplier = (
+		local redValue = (c.r as float) * multiplier
+		local greenValue = (c.g as float) * multiplier
+		local blueValue = (c.b as float) * multiplier
+
+		if (redValue > 255.0) do redValue = 255.0
+		if (greenValue > 255.0) do greenValue = 255.0
+		if (blueValue > 255.0) do blueValue = 255.0
+
+		return color redValue greenValue blueValue
 	),
 
 	fn isGlass i = (
@@ -4448,7 +4536,7 @@ struct BatchGLBConverterWrapper (
 		return false
 	),
 
-		fn coronaPhysicalMtlToGltfMaterial falloffMaterials: #() = (
+	fn coronaPhysicalMtlToGltfMaterial falloffMaterials: #() = (
 		for i in getClassInstances CoronaPhysicalMtl do (
 			i.roughnessMode = 0
 			local nm = glTFMaterial()
@@ -4529,8 +4617,9 @@ struct BatchGLBConverterWrapper (
 			if (i.baseIor < 1.1) do nm.roughness = 1.0
 
 			-- Self Illumination
-			if (i.selfIllumLevel != 0) do (
-				nm.emissionColor = i.selfIllumColor
+			if (i.selfIllumLevel != 0 or i.selfIllumTexmap != undefined) do (
+				local selfIllumLevel = if (i.selfIllumLevel != 0) then (i.selfIllumLevel as float) else 1.0
+				nm.emissionColor = this.scaleColor i.selfIllumColor selfIllumLevel
 				nm.emissionMap = i.selfIllumTexmap
 				this.addTextureToQueue nm.emissionMap
 			)
@@ -5237,6 +5326,9 @@ struct BatchGLBConverterWrapper (
 		try (watchdogMgr.beat stage: "simplify_corona_mix") catch()
 		this.neutralizeCoronaMix()
 
+		try (watchdogMgr.beat stage: "convert_corona_light_to_physical") catch()
+		this.coronaLightMtlToCoronaPhysicalMtl()
+
 		-- Convert to GLTF Material
 		try (watchdogMgr.beat stage: "convert_corona_physical_to_gltf") catch()
 		this.coronaPhysicalMtlToGltfMaterial falloffMaterials: falloffMaterials
@@ -5344,6 +5436,151 @@ struct BatchGLBConverterWrapper (
 		return undefined
 	),
 
+	fn normalizePathSlash pathValue = (
+		if (pathValue == undefined) do return ""
+		return substituteString (pathValue as string) "/" @"\"
+	),
+
+	fn ensureDirectorySlash pathValue = (
+		local normalizedPath = this.normalizePathSlash pathValue
+		if (normalizedPath != "" and (substring normalizedPath normalizedPath.count 1) != "\\") do normalizedPath += @"\"
+		return normalizedPath
+	),
+
+	fn collectTextureFilesRecursive rootPath = (
+		local files = #()
+		rootPath = this.ensureDirectorySlash rootPath
+		if (rootPath == undefined or rootPath == "") do return files
+		if (not doesDirectoryExist rootPath) do return files
+
+		local texturePatterns = #(
+			"*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff", "*.bmp", "*.gif",
+			"*.tga", "*.exr", "*.hdr", "*.dds", "*.tx", "*.webp", "*.psd"
+		)
+
+		for pattern in texturePatterns do (
+			join files (getFiles (rootPath + pattern))
+		)
+
+		for directoryPath in getDirectories (rootPath + "*") do (
+			join files (this.collectTextureFilesRecursive directoryPath)
+		)
+
+		return files
+	),
+
+	fn makeTextureFileIndex rootPaths = (
+		local index = dotNetObject "System.Collections.Hashtable"
+
+		for rootPath in rootPaths do (
+			local normalizedRootPath = this.ensureDirectorySlash rootPath
+			if (normalizedRootPath != "" and doesDirectoryExist normalizedRootPath) do (
+				for textureFile in this.collectTextureFilesRecursive normalizedRootPath do (
+					local fileKey = toLower (filenameFromPath textureFile)
+					if (fileKey != "" and not (index.ContainsKey fileKey)) do (
+						index.Add fileKey textureFile
+					)
+				)
+			)
+		)
+
+		return index
+	),
+
+	fn collectTextureMapsWithFilename = (
+		struct TexturePathRecord (textureValue, propertyName)
+		local records = #()
+		local textureClassNames = #(
+			"Bitmaptexture",
+			"CoronaBitmap",
+			"VRayHDRI",
+			"VRayBitmap",
+			"OSLBitmap",
+			"AdobeBitmap",
+			"AutodeskBitmap"
+		)
+		local filenameProperties = #(#filename, #fileName, #HDRIMapName, #mapName)
+
+		for className in textureClassNames do (
+			local textureClass = try (execute className) catch (undefined)
+			if (textureClass != undefined) do (
+				try (
+					for textureValue in getClassInstances textureClass do (
+						for propertyName in filenameProperties do (
+							local hasFilename = try (isProperty textureValue propertyName) catch (false)
+							if (hasFilename) do append records (TexturePathRecord textureValue:textureValue propertyName:propertyName)
+						)
+					)
+				) catch ()
+			)
+		)
+
+		return records
+	),
+
+	fn absolutePathInAtsOps = (
+		local assets = #()
+
+		try (
+			ATSOps.Visible = false
+			ATSOps.Visible = true
+			ATSOps.Refresh()
+			ATSOps.GetFiles &assets
+			ATSOps.SelectFiles assets
+			ATSOps.ResolveSelectionToAbsolute()
+			ATSOps.Refresh()
+			ATSOps.Visible = false
+		) catch (
+			try (ATSOps.Visible = false) catch()
+		)
+
+		assets = #()
+		return true
+	),
+
+	fn relinkSceneTextures rootPaths = (
+		this.absolutePathInAtsOps()
+		local textureIndex = this.makeTextureFileIndex rootPaths
+		local relinkedCount = 0
+		local missingCount = 0
+		local alreadyCorrectCount = 0
+
+		if (textureIndex.Count == 0) do (
+			print "[Warning] Texture relink skipped. No texture files were found near the source scene."
+			return #(relinkedCount, missingCount)
+		)
+
+		for textureRecord in this.collectTextureMapsWithFilename() do (
+			local currentFilename = try ((getProperty textureRecord.textureValue textureRecord.propertyName) as string) catch ("")
+			if (currentFilename == "") do continue
+
+			local fileKey = toLower (filenameFromPath currentFilename)
+			if (fileKey == "" or getFilenameType fileKey == "") do continue
+			if (textureIndex.ContainsKey fileKey) then (
+				local resolvedFilename = textureIndex.Item[fileKey]
+				local currentNormalized = toLower (this.normalizePathSlash currentFilename)
+				local resolvedNormalized = toLower (this.normalizePathSlash resolvedFilename)
+				if (currentNormalized == resolvedNormalized) do (
+					alreadyCorrectCount += 1
+					continue
+				)
+
+				try (
+					setProperty textureRecord.textureValue textureRecord.propertyName resolvedFilename
+					relinkedCount += 1
+				) catch (
+					missingCount += 1
+				)
+			) else (
+				missingCount += 1
+			)
+		)
+
+		try (ATSOps.Refresh()) catch()
+		print ("Texture relink finished. Relinked: " + (relinkedCount as string) + ". Already correct: " + (alreadyCorrectCount as string) + ". Missing: " + (missingCount as string) + ".")
+		return #(relinkedCount, missingCount, alreadyCorrectCount)
+	),
+
 	fn enableBackFaceCull = (
 		for i in objects do try (i.backfacecull = true) catch ()
 	),
@@ -5407,7 +5644,10 @@ struct BatchGLBConverterWrapper (
 			r.type = #max
 			r.opened = maxFileName == nn
 			r.maxName = nn
-			if (r.opened) do deleteSpheres()
+			if (r.opened) do (
+				this.relinkSceneTextures #(p)
+				deleteSpheres()
+			)
 
 			return r
 		)
@@ -5432,6 +5672,9 @@ struct BatchGLBConverterWrapper (
 		loadMaxFile m quiet: true
 		SetQuietMode false
 		r.opened = maxFileName == nn
+		if (r.opened) do (
+			this.relinkSceneTextures #(o, getFilenamePath m)
+		)
 
 		max tool zoomextents
 		max tool maximize
@@ -6489,6 +6732,8 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local layerNames = getGeometryLayerNames()
 		local splitByLayers = layerNames.count > 1
 		local sourceSceneFile = maxFilePath + maxFileName
+		local sourceTextureRoot = getFilenamePath sourceSceneFile
+		local archiveTextureRoot = (getFilenamePath file) + (getFilenameFile file) + @"\"
 		local sourceDeleteDir = undefined
 		
 		if (splitByLayers and doesFileExist sourceSceneFile) then (
@@ -6518,6 +6763,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 				postProcessLog ("Loading source scene for layer " + (i as string) + ": " + layerName)
 				try (watchdogMgr.beat stage: ("loading_layer_" + (i as string))) catch()
 				loadMaxFile sourceSceneFile quiet: true
+				::API_BATCH_GLB_CONVERTER.relinkSceneTextures #(archiveTextureRoot, sourceTextureRoot)
 				resetLoadedSceneState()
 
 				local objectsCount = keepOnlyGeometryFromLayer layerName
@@ -6571,6 +6817,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 							postProcessLog ("Loading source scene for auto variant " + (i as string) + ": " + layerName)
 							try (watchdogMgr.beat stage: ("loading_auto_variant_" + (i as string))) catch()
 							loadMaxFile autoSplitSourceFile quiet: true
+							::API_BATCH_GLB_CONVERTER.relinkSceneTextures #(archiveTextureRoot, sourceTextureRoot, getFilenamePath autoSplitSourceFile)
 							resetLoadedSceneState()
 
 							local objectsCount = keepOnlyGeometryFromLayer layerName
@@ -7412,6 +7659,7 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 
 				debugLog ("Loading source scene for layer " + (i as string) + ": " + layerName)
 				loadMaxFile workingSceneFile quiet: true
+				::API_BATCH_GLB_CONVERTER.relinkSceneTextures #(getFilenamePath workingSceneFile)
 				::_rGCAutoGLBConverter_Main.resetLoadedSceneState()
 
 				local objectsCount = ::_rGCAutoGLBConverter_Main.keepOnlyGeometryFromLayer layerName
@@ -7461,6 +7709,7 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 
 							debugLog ("Loading source scene for auto variant " + (i as string) + ": " + layerName)
 							loadMaxFile autoSplitSourceFile quiet: true
+							::API_BATCH_GLB_CONVERTER.relinkSceneTextures #(getFilenamePath autoSplitSourceFile)
 							::_rGCAutoGLBConverter_Main.resetLoadedSceneState()
 
 							local objectsCount = ::_rGCAutoGLBConverter_Main.keepOnlyGeometryFromLayer layerName
