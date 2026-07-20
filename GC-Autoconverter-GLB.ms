@@ -5583,6 +5583,9 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local p1 = '*'.get "edtInputPath"
 		if (p1 != "" and doesDirectoryExist p1) do edtInputPath.text = p1
 
+		local maxAllowedPolys = '*'.get "spnMaxAllowedPolys" type: #int
+		::_MAX_ALLOWED_POLYS = if (maxAllowedPolys != 0) then maxAllowedPolys else 250000
+
 		btnStartStartupProcess.enabled = edtInputPath.text != ""
 
 		local n = '*'.get "cbxConvertToBlend"
@@ -7114,6 +7117,10 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 		radiobuttons rdoAOUnwrapMethod labels: #("3ds Max Unwrap", "Blender Unwrap") columns: 2 default: 1 align: #left
 	)
 
+	group "Conversion Limits" (
+		spinner spnMaxAllowedPolys "Variant poly limit:" range: [1, 999999999, 250000] type: #integer fieldwidth: 70 align: #left
+	)
+
 	group "Variant Split" (
 		checkbox cbxAutoSplitVariants "Auto Split Variants"
 	)
@@ -7139,6 +7146,10 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 		local maxUnwrapLimit = '*'.get "spnMaxUnwrapAOPolyLimit" type: #int
 		spnMaxUnwrapAOPolyLimit.value = if (maxUnwrapLimit != 0) then maxUnwrapLimit else 100000
 
+		local maxAllowedPolys = '*'.get "spnMaxAllowedPolys" type: #int
+		spnMaxAllowedPolys.value = if (maxAllowedPolys != 0) then maxAllowedPolys else 250000
+		::_MAX_ALLOWED_POLYS = spnMaxAllowedPolys.value
+
 		cbxAODenoise.checked = '*'.get "cbxAODenoise" type: #bool_false
 		local unwrapMethod = '*'.get "aoUnwrapMethod"
 		rdoAOUnwrapMethod.state = if (unwrapMethod == "blender" or unwrapMethod == "uvatlas") then 2 else 1
@@ -7154,6 +7165,10 @@ rollout _rGCAutoGLBConverter_Settings "Settings" category: 3 (
 	on spnAOSize changed v do '*'.add  "spnAOSize" v
 	on spnAOResolution changed v do '*'.add  "spnAOResolution" v
 	on spnMaxUnwrapAOPolyLimit changed v do '*'.add "spnMaxUnwrapAOPolyLimit" v
+	on spnMaxAllowedPolys changed v do (
+		'*'.add "spnMaxAllowedPolys" v
+		::_MAX_ALLOWED_POLYS = v
+	)
 	on cbxAODenoise changed v do '*'.add  "cbxAODenoise" v
 	on cbxAutoSplitVariants changed v do '*'.add "cbxAutoSplitVariants" v
 	on rdoAOUnwrapMethod changed state do (
