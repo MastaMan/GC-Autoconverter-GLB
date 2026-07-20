@@ -5532,8 +5532,8 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	local emptyQueueChecksInSession = 0
 	local apiQueueFailureCount = 0
 	local apiQueueTelegramAlertSent = false
+	local restartRunAfterKill = true
 	local processTelegramLogs = #()
-	local completedQueueIdsInSession = #()
 
 	group "Working Path" (
 		edittext edtInputPath "" readonly: true across: 2 align: #left fieldwidth: 215 height: 22
@@ -5755,10 +5755,11 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		tmrQueueRestart.active = true
 	)
 
-	fn restart3dsMax = (
+	fn restart3dsMax runAfterKill: true = (
 		local currentPath = getFileNamePath (getThisScriptFileName())
 		local maxExe = (pathConfig.GetDir #maxroot) + "3dsmax.exe"
-		local args = maxExe + ";"
+		local restartMode = if (runAfterKill) then "" else "dontrun"
+		local args = maxExe + ";" + restartMode
 		local cmd = "restart.bat \"" + args + "\""
 		local curDir = sysInfo.currentDir
 
@@ -5767,9 +5768,10 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		sysInfo.currentDir = curDir
 	)
 
-	fn schedule3dsMaxRestart msg = (
+	fn schedule3dsMaxRestart msg runAfterKill: true = (
 		print msg
 		requestMgr.postLog txt: msg
+		restartRunAfterKill = runAfterKill
 
 		tmrNextProcess.active = false
 		tmrQueueRestart.active = false
@@ -5790,7 +5792,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 	fn schedule3dsMaxRestartAfterEmptyQueueLimit = (
 		local msg = "Queue was empty " + (emptyQueueChecksInSession as string) + " times in a row. Restarting 3ds Max..."
-		schedule3dsMaxRestart msg
+		schedule3dsMaxRestart msg runAfterKill: false
 	)
 
 	fn getRemainingFilesInSession = (
@@ -5953,17 +5955,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		processTelegramLogs = #()
 	)
 
-	fn rememberCompletedQueueId aId = (
-		if (aId == undefined or aId == "") do return false
-		if ((findItem completedQueueIdsInSession (aId as string)) == 0) do append completedQueueIdsInSession (aId as string)
-		return true
-	)
-
-	fn isCompletedQueueId aId = (
-		if (aId == undefined or aId == "") do return false
-		return ((findItem completedQueueIdsInSession (aId as string)) > 0)
-	)
-
 	fn addProcessTelegramLog txt = (
 		if (txt == undefined) do txt = ""
 		append processTelegramLogs (txt as string)
@@ -6110,7 +6101,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		postProcessLog errorMessage
 		try (watchdogMgr.beat stage: "posting_error") catch()
 		requestMgr.postStatus #error txt: message
-		rememberCompletedQueueId requestMgr.a_id
 		if (statusCaption == "") do statusCaption = message
 		lblStatus.caption = statusCaption
 
@@ -6389,16 +6379,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		requestMgr.model_id = model_id
 		requestMgr.version_id = version_id
 		requestMgr.slug = slug
-
-		if (isCompletedQueueId a_id) do (
-			local duplicateMsg = "[Warning] Backend returned an already completed queue item in this 3ds Max session. Skipping duplicate local processing. AID: " + (a_id as string) + ", slug: " + slug
-			print duplicateMsg
-			requestMgr.postLog txt: duplicateMsg
-			lblStatus.caption = "Duplicate completed queue item skipped."
-			statusMessageNextProcess create: true
-			tmrNextProcess.active = true
-			return false
-		)
 
 		postProcessLog "Updating status to In Progress..."
 		lblStatus.caption = "Updating status to In Progress..."
@@ -6688,7 +6668,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			local warningsText = getProcessWarningsText()
 			if (warningsText != "") do successStatusText += "\n\nWarnings:\n" + warningsText
 			requestMgr.postStatus #success txt: successStatusText result_json: result_json
-			rememberCompletedQueueId a_id
 			markProcessedFileInSession()
 			sendProcessingTelegramReport true slug source_original_name expectedExitFiles uploadedFiles failedFiles result_json
 			watchdogMgr.clear()
@@ -6697,7 +6676,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			lblStatus.caption = "No files were uploaded."
 			try (watchdogMgr.beat stage: "posting_error") catch()
 			requestMgr.postStatus #error txt: m
-			rememberCompletedQueueId a_id
 			postProcessLog m
 			markProcessedFileInSession()
 			sendProcessingTelegramReport false slug source_original_name expectedExitFiles uploadedFiles failedFiles "" errorMessage: m
@@ -6776,7 +6754,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		if (v) then (
 			processedFilesInSession = 0
 			emptyQueueChecksInSession = 0
-			completedQueueIdsInSession = #()
 			updateRemainingFilesLabel()
 
 			local s = "try (fileIn @\"" + (getThisScriptFilename()) + "\") catch (print \"Error! Can't GC-Autoconverter-GLB.ms!\")"
@@ -6841,7 +6818,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 	on tmrCounteRestart tick do (
 		tmrCounteRestart.active = false
-		restart3dsMax()
+		restart3dsMax runAfterKill: restartRunAfterKill
 	)
 
 	on tmrOnStartDelay tick do (
