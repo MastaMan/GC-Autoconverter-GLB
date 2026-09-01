@@ -1812,7 +1812,9 @@ struct BlenderGLBWrapper (
 	),
 	fn getUnits = (
 		local u = getBlenderData key: "system_units"
+		if (u == undefined or u == "") do return ""
 		u = toLower u
+		if (u.count < 1) do return ""
 		u[1] = toUpper u[1]
 
 		case u of (
@@ -1836,6 +1838,7 @@ struct BlenderGLBWrapper (
 	),
 	fn getRender = (
 		local r = getBlenderData key: "render"
+		if (r == undefined or r == "") do return ""
 
 		if (matchpattern r pattern:"BLENDER_RENDER") do return "Blender Render"
 		if (matchpattern r pattern:"CYCLES") do return "Cycles"
@@ -2019,6 +2022,7 @@ struct SketchupConverterWrapper (
     ),
 	fn getUnits = (
         local u = trimLeft (units.SystemType as string) "#"
+        if (u == undefined or u == "") do return ""
         u[1] = toUpper u[1]
         return u
     ),
@@ -5185,6 +5189,7 @@ struct BatchGLBConverterWrapper (
 
 	fn getUnits = (
         local u = trimLeft (units.SystemType as string) "#"
+        if (u == undefined or u == "") do return ""
         u[1] = toUpper u[1]
         return u
     ),
@@ -5458,12 +5463,29 @@ struct BatchGLBConverterWrapper (
 			"*.tga", "*.exr", "*.hdr", "*.dds", "*.tx", "*.webp", "*.psd"
 		)
 
-		for pattern in texturePatterns do (
-			join files (getFiles (rootPath + pattern))
-		)
+		local visitedDirectories = dotNetObject "System.Collections.Hashtable"
+		local directoriesToScan = #(rootPath)
+		local directoryIndex = 1
 
-		for directoryPath in getDirectories (rootPath + "*") do (
-			join files (this.collectTextureFilesRecursive directoryPath)
+		while directoryIndex <= directoriesToScan.count do (
+			local currentDirectory = this.ensureDirectorySlash directoriesToScan[directoryIndex]
+			directoryIndex += 1
+
+			local directoryKey = toLower currentDirectory
+			if (currentDirectory == "" or visitedDirectories.ContainsKey directoryKey) do continue
+			visitedDirectories.Add directoryKey true
+
+			for pattern in texturePatterns do (
+				join files (getFiles (currentDirectory + pattern))
+			)
+
+			for childDirectory in getDirectories (currentDirectory + "*") do (
+				local normalizedChildDirectory = this.ensureDirectorySlash childDirectory
+				local childDirectoryKey = toLower normalizedChildDirectory
+				if (normalizedChildDirectory != "" and not (visitedDirectories.ContainsKey childDirectoryKey)) do (
+					append directoriesToScan normalizedChildDirectory
+				)
+			)
 		)
 
 		return files
