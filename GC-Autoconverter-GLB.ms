@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.4.0
+VERSION=1.4.1
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -123,6 +123,9 @@ Auto Converter to GLB/SKP/BLEND script=
 + Added: CoronaLightMtl conversion through CoronaPhysicalMtl self illumination=
 + Improved: CoronaPhysicalMtl self illumination is exported as GLTF emission even when only a self-illumination map is present=
 + Improved: Scene texture relink now force-resolves texture paths from the source scene folder and extracted archive subfolders=
+
+[1.4.1]
+- BugFix: Watchdog timeouts report overly complex files as errors before processing the next queue item=
 
 [FILES]
 Install.mcr=
@@ -1312,6 +1315,13 @@ struct settingsWrapper (
 
 global '*' = settingsWrapper()
 
+struct WatchdogTimeoutData (
+	a_id,
+	slug,
+	stage,
+	timeoutMin
+)
+
 struct watchdogWrapper (
 	currentPath = getFileNamePath (getThisScriptFileName()),
 	ini = currentPath + "watchdog.ini",
@@ -1360,6 +1370,28 @@ struct watchdogWrapper (
 		return attemptStage
 	),
 
+	fn getPendingError = (
+		local pendingError = getIniSetting this.ini this.sec "pendingError"
+		if (pendingError == undefined or (toLower pendingError) != "true") do return undefined
+
+		local attemptAId = getIniSetting this.ini this.sec "attemptAId"
+		if (attemptAId == undefined or attemptAId == "") do return undefined
+
+		local attemptSlug = getIniSetting this.ini this.sec "attemptSlug"
+		local attemptStage = getIniSetting this.ini this.sec "attemptStage"
+		local attemptTimeoutMin = try ((getIniSetting this.ini this.sec "attemptTimeoutMin") as integer) catch (0)
+		if (attemptSlug == undefined) do attemptSlug = ""
+		if (attemptStage == undefined) do attemptStage = ""
+		if (attemptTimeoutMin < 1) do attemptTimeoutMin = this.getTimeoutMin()
+
+		return WatchdogTimeoutData a_id: attemptAId slug: attemptSlug stage: attemptStage timeoutMin: attemptTimeoutMin
+	),
+
+	fn markPendingErrorReported = (
+		setIniSetting this.ini this.sec "pendingError" "false"
+		return true
+	),
+
 	fn isAOAttemptStage stage = (
 		if (stage == undefined) do return false
 		stage = stage as string
@@ -1379,6 +1411,8 @@ struct watchdogWrapper (
 		setIniSetting this.ini this.sec "attemptAId" ""
 		setIniSetting this.ini this.sec "attemptSlug" ""
 		setIniSetting this.ini this.sec "attemptStage" ""
+		setIniSetting this.ini this.sec "attemptTimeoutMin" ""
+		setIniSetting this.ini this.sec "pendingError" ""
 		setIniSetting this.ini this.sec "lastTimeoutAt" ""
 	),
 
@@ -6385,6 +6419,28 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		return false
 	)
 
+	fn reportPendingWatchdogError = (
+		local timeoutData = watchdogMgr.getPendingError()
+		if (timeoutData == undefined) do return true
+
+		local errorMessage = "The file is too complex to process within the allowed time. Please simplify the file and try again."
+
+		local currentAId = requestMgr.a_id
+		requestMgr.a_id = timeoutData.a_id
+		requestMgr.postLog txt: ("[Error] " + errorMessage)
+		local isErrorReported = requestMgr.postStatus #error txt: errorMessage
+		requestMgr.a_id = currentAId
+
+		if (isErrorReported) then (
+			watchdogMgr.markPendingErrorReported()
+			print ("[Watchdog] Previous task error reported for AID " + (timeoutData.a_id as string) + ".")
+			return true
+		)
+
+		print ("[Watchdog] Could not report the previous task error for AID " + (timeoutData.a_id as string) + ".")
+		return false
+	)
+
 	fn getGeometryLayerNames = (
 		local names = #()
 
@@ -6643,6 +6699,12 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local source_original_name = jr.getString "source_original_name"
 		local count_total = jr.getInt "count_total"
 		local outputBaseName = a_id
+
+		if (not reportPendingWatchdogError()) do (
+			restartProcessFiles msg: "Cannot report the previous watchdog timeout. Retrying in"
+			return false
+		)
+
 		requestMgr.a_id = a_id
 		requestMgr.model_id = model_id
 		requestMgr.version_id = version_id
