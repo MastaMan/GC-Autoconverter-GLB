@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.4.2
+VERSION=1.4.3
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -131,6 +131,10 @@ Auto Converter to GLB/SKP/BLEND script=
 + Added: Exact-case GC- layer names define explicit export variants with sanitized output names=
 + Improved: Explicit variant geometry is isolated and moved to the default layer before export=
 + Improved: Scenes without GC variants move all geometry to the default layer before legacy Auto Split or whole-scene export=
+
+[1.4.3]
++ Improved: Full-scene preflight collects all existing validation errors before conversion starts=
++ Improved: Validation findings are deduplicated, deterministically ordered and sent in one complete error report=
 
 [FILES]
 Install.mcr=
@@ -2862,6 +2866,30 @@ struct PreflightWrapper (
 		return issues
 	),
 
+	fn appendUniqueIssues issues newIssues = (
+		for issue in newIssues do this.appendUniqueIssue issues issue
+		return issues
+	),
+
+	fn sortIssues issues = (
+		local sortedIssues = for issue in issues collect issue
+
+		fn compareIssues issueA issueB = (
+			local keyA = (issueA.issueType as string) + "|" + (issueA.location as string) + "|" + (issueA.technical as string) + "|" + (issueA.val as string)
+			local keyB = (issueB.issueType as string) + "|" + (issueB.location as string) + "|" + (issueB.technical as string) + "|" + (issueB.val as string)
+			local stringClass = dotNetClass "System.String"
+			local compareResult = stringClass.Compare (toLower keyA) (toLower keyB)
+			if (compareResult == 0) do compareResult = stringClass.Compare keyA keyB
+
+			if (compareResult < 0) do return -1
+			if (compareResult > 0) do return 1
+			return 0
+		)
+
+		qsort sortedIssues compareIssues
+		return sortedIssues
+	),
+
 	fn getSafeClassName item = (
 		local className = "Unknown"
 		try (className = (classOf item) as string) catch ()
@@ -3084,6 +3112,22 @@ struct PreflightWrapper (
 		)
 
 		return lines
+	),
+
+	fn formatFullScenePreflight errors warnings title: "Scene preflight failed. Conversion stopped." = (
+		local report = title
+
+		if (errors.count > 0) do (
+			report += "\n\nErrors (" + (errors.count as string) + "):"
+			for i in 1 to errors.count do report += "\n\n" + (i as string) + ". " + (this.formatIssue errors[i])
+		)
+
+		if (warnings.count > 0) do (
+			report += "\n\nWarnings (" + (warnings.count as string) + "):"
+			for i in 1 to warnings.count do report += "\n\n" + (i as string) + ". " + (this.formatIssue warnings[i])
+		)
+
+		return report
 	),
 
 	fn getGeometryPolyStats nodes label: "" = (
@@ -6612,6 +6656,47 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		return issues
 	)
 
+	fn runFullScenePreflight = (
+		struct FullScenePreflightResultData (
+			errors,
+			warnings,
+			geometryLayerNames,
+			layerVariants,
+			layerVariantMode,
+			variantSplitResult
+		)
+
+		local result = FullScenePreflightResultData errors: #() warnings: #() geometryLayerNames: #() layerVariants: #() layerVariantMode: #legacy_auto_split variantSplitResult: undefined
+		local sceneIssues = ::preflightMgr.getSceneIssues()
+		::preflightMgr.appendUniqueIssues result.errors sceneIssues[1]
+		::preflightMgr.appendUniqueIssues result.warnings sceneIssues[2]
+
+		result.geometryLayerNames = getGeometryLayerNames()
+		result.layerVariants = getExplicitGCLayerVariants result.geometryLayerNames
+		result.layerVariantMode = getLayerVariantMode result.layerVariants
+
+		if (result.layerVariantMode == #explicit_gc) then (
+			local polygonIssues = getLayerVariantPolygonLimitIssues result.layerVariants
+			::preflightMgr.appendUniqueIssues result.errors polygonIssues
+		) else if (isAutoSplitVariantsEnabled()) then (
+			result.variantSplitResult = ::variantSplitMgr.detect()
+			if (result.variantSplitResult.isAccepted) then (
+				local polygonIssues = getVariantPolygonLimitIssues result.variantSplitResult.clusters
+				::preflightMgr.appendUniqueIssues result.errors polygonIssues
+			) else (
+				local polygonIssue = ::preflightMgr.getScenePolygonLimitIssue (geometry as array) _MAX_ALLOWED_POLYS label: "Whole scene"
+				if (polygonIssue != undefined) do ::preflightMgr.appendUniqueIssue result.errors polygonIssue
+			)
+		) else (
+			local polygonIssue = ::preflightMgr.getScenePolygonLimitIssue (geometry as array) _MAX_ALLOWED_POLYS label: "Whole scene"
+			if (polygonIssue != undefined) do ::preflightMgr.appendUniqueIssue result.errors polygonIssue
+		)
+
+		result.errors = ::preflightMgr.sortIssues result.errors
+		result.warnings = ::preflightMgr.sortIssues result.warnings
+		return result
+	)
+
 	fn keepOnlyGeometryFromLayer layerName = (
 		local nodesToDelete = #()
 
@@ -6922,27 +7007,26 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		postProcessLog "Removing sphere helper objects before scene checks..."
 		try (::API_BATCH_GLB_CONVERTER.deleteSpheres()) catch()
 
-		try (watchdogMgr.beat stage: "checking_unsupported_scene_features") catch()
-		local preflightIssues = ::preflightMgr.getSceneIssues()
-		local preflightErrors = preflightIssues[1]
-		local preflightWarnings = preflightIssues[2]
+		try (watchdogMgr.beat stage: "checking_full_scene_preflight") catch()
+		local fullPreflight = runFullScenePreflight()
+		local preflightErrors = fullPreflight.errors
+		local preflightWarnings = fullPreflight.warnings
+
+		if (preflightErrors.count > 0) do (
+			local errorReport = ::preflightMgr.formatFullScenePreflight preflightErrors preflightWarnings title: "Scene preflight found validation issues. Conversion stopped."
+			return failCurrentProcess slug source_original_name errorReport statusCaption: "Scene validation failed. Skipping file."
+		)
 
 		if (preflightWarnings.count > 0) do (
 			local warningReport = ::preflightMgr.formatIssues preflightWarnings title: "[Warning] Scene preflight warnings:"
 			postProcessLog warningReport
 		)
 
-		if (preflightErrors.count > 0) do (
-			local errorReport = ::preflightMgr.formatIssues preflightErrors title: "Unsupported scene features detected. Conversion stopped."
-			local shortError = "Unsupported scene features detected. Conversion stopped. Check conversion log for details."
-			postProcessLog errorReport
-			return failCurrentProcess slug source_original_name shortError statusCaption: "Unsupported scene features detected. Skipping file."
-		)
-
 		local expectedExitFiles = #()
-		local geometryLayerNames = getGeometryLayerNames()
-		local layerVariants = getExplicitGCLayerVariants geometryLayerNames
-		local layerVariantMode = getLayerVariantMode layerVariants
+		local geometryLayerNames = fullPreflight.geometryLayerNames
+		local layerVariants = fullPreflight.layerVariants
+		local layerVariantMode = fullPreflight.layerVariantMode
+		local preflightVariantSplitResult = fullPreflight.variantSplitResult
 		local splitByLayers = layerVariantMode == #explicit_gc
 		local sourceSceneFile = maxFilePath + maxFileName
 		local sourceTextureRoot = getFilenamePath sourceSceneFile
@@ -6953,15 +7037,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			try (watchdogMgr.beat stage: "checking_layers") catch()
 			postProcessLog ("Scene has " + (layerVariants.count as string) + " explicit GC variant layers. Converting each variant separately.")
 			logLayerVariantPolyStats layerVariants
-
-			try (watchdogMgr.beat stage: "checking_polygons") catch()
-			local polygonLimitIssues = getLayerVariantPolygonLimitIssues layerVariants
-			if (polygonLimitIssues.count > 0) do (
-				local errorReport = ::preflightMgr.formatIssues polygonLimitIssues title: "Polygon preflight failed. Conversion stopped."
-				local shortError = "Layer polygon limit exceeded. Conversion stopped. Check conversion log for details."
-				postProcessLog errorReport
-				return failCurrentProcess slug source_original_name shortError statusCaption: "Layer polygon limit exceeded. Skipping file."
-			)
 
 			r.del = false
 
@@ -7018,18 +7093,10 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			if (layerVariantMode == #legacy_auto_split and isAutoSplitVariantsEnabled()) do (
 				try (watchdogMgr.beat stage: "auto_split_variants") catch()
 				postProcessLog "Layer split was not applied. Checking automatic variant split..."
-				local variantSplitResult = ::variantSplitMgr.detect()
+				local variantSplitResult = preflightVariantSplitResult
 				logVariantSplitResult variantSplitResult postLogs: true
 
 				if (variantSplitResult.isAccepted) do (
-					local variantPolygonIssues = getVariantPolygonLimitIssues variantSplitResult.clusters
-					if (variantPolygonIssues.count > 0) do (
-						local errorReport = ::preflightMgr.formatIssues variantPolygonIssues title: "Variant polygon preflight failed. Conversion stopped."
-						local shortError = "Auto variant polygon limit exceeded. Conversion stopped. Check conversion log for details."
-						postProcessLog errorReport
-						return failCurrentProcess slug source_original_name shortError statusCaption: "Auto variant polygon limit exceeded. Skipping file."
-					)
-
 					local autoSplitSourceFile = d + (genGUID()) + "-auto-split.max"
 					local autoVariantLayerNames = ::variantSplitMgr.createVariantLayers variantSplitResult prefix: "AUTO-VARIANT"
 					postProcessLog ("Auto Split intermediate variant layers created: " + (autoVariantLayerNames.count as string))
@@ -7074,17 +7141,9 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			)
 
 			if (not isAutoSplitConverted) do (
-				try (watchdogMgr.beat stage: "checking_polygons") catch()
 				local sceneStat = getGeometryPolyStats (geometry as array) label: "Whole scene"
 				postProcessLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
 				postProcessLog ("Scene polygon count: " + (formatPolyStats sceneStat))
-				local polygonLimitIssue = ::preflightMgr.getScenePolygonLimitIssue (geometry as array) _MAX_ALLOWED_POLYS label: "Whole scene"
-				if (polygonLimitIssue != undefined) do (
-					local errorReport = ::preflightMgr.formatIssues #(polygonLimitIssue) title: "Polygon preflight failed. Conversion stopped."
-					local shortError = "Scene polygon limit exceeded. Conversion stopped. Check conversion log for details."
-					postProcessLog errorReport
-					return failCurrentProcess slug source_original_name shortError statusCaption: "Polygon limit exceeded. Skipping file."
-				)
 
 				convertSceneVariant r (outputBaseName + "-GLB") (outputBaseName + "-BLEND") (outputBaseName + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles
 			)
@@ -7841,9 +7900,19 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 		debugLog "Removing sphere helper objects before scene checks..."
 		try (::API_BATCH_GLB_CONVERTER.deleteSpheres()) catch()
 
-		local preflightIssues = ::preflightMgr.getSceneIssues()
-		local preflightErrors = preflightIssues[1]
-		local preflightWarnings = preflightIssues[2]
+		local fullPreflight = ::_rGCAutoGLBConverter_Main.runFullScenePreflight()
+		local preflightErrors = fullPreflight.errors
+		local preflightWarnings = fullPreflight.warnings
+
+		if (preflightErrors.count > 0) do (
+			local errorReport = ::preflightMgr.formatFullScenePreflight preflightErrors preflightWarnings title: "Scene preflight found validation issues. Debug conversion stopped."
+			print errorReport
+			debugLog "Scene validation failed. Debug conversion stopped."
+			SetQuietMode false
+			restoreDebugSourceScene sourceSceneFile
+			messageBox errorReport title: "Debug"
+			return false
+		)
 
 		if (preflightWarnings.count > 0) do (
 			local warningReport = ::preflightMgr.formatIssues preflightWarnings title: "[Warning] Scene preflight warnings:"
@@ -7851,19 +7920,10 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 			debugLog "[Warning] Scene preflight warnings were found. Check Listener for details."
 		)
 
-		if (preflightErrors.count > 0) do (
-			local errorReport = ::preflightMgr.formatIssues preflightErrors title: "Unsupported scene features detected. Conversion stopped."
-			print errorReport
-			debugLog "Unsupported scene features detected. Debug conversion stopped."
-			SetQuietMode false
-			restoreDebugSourceScene sourceSceneFile
-			messageBox "Unsupported scene features detected. Debug conversion stopped. Check Listener for details." title: "Debug"
-			return false
-		)
-
-		local geometryLayerNames = ::_rGCAutoGLBConverter_Main.getGeometryLayerNames()
-		local layerVariants = ::_rGCAutoGLBConverter_Main.getExplicitGCLayerVariants geometryLayerNames
-		local layerVariantMode = ::_rGCAutoGLBConverter_Main.getLayerVariantMode layerVariants
+		local geometryLayerNames = fullPreflight.geometryLayerNames
+		local layerVariants = fullPreflight.layerVariants
+		local layerVariantMode = fullPreflight.layerVariantMode
+		local preflightVariantSplitResult = fullPreflight.variantSplitResult
 		local splitByLayers = layerVariantMode == #explicit_gc
 
 		if (splitByLayers) then (
@@ -7871,16 +7931,6 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 			for layerVariant in layerVariants do (
 				local stat = ::_rGCAutoGLBConverter_Main.getLayerVariantPolyStat layerVariant
 				debugLog ("Layer polygon count: " + (::_rGCAutoGLBConverter_Main.formatPolyStats stat))
-			)
-
-			local polygonLimitIssues = ::_rGCAutoGLBConverter_Main.getLayerVariantPolygonLimitIssues layerVariants
-			if (polygonLimitIssues.count > 0) do (
-				local m = ::preflightMgr.formatIssues polygonLimitIssues title: "Polygon preflight failed. Debug conversion stopped."
-				print m
-				SetQuietMode false
-				restoreDebugSourceScene sourceSceneFile
-				messageBox m title: "Debug"
-				return false
 			)
 
 			for i in 1 to layerVariants.count do (
@@ -7936,20 +7986,10 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 
 			if (layerVariantMode == #legacy_auto_split and ::_rGCAutoGLBConverter_Main.isAutoSplitVariantsEnabled()) do (
 				debugLog "Layer split was not applied. Checking automatic variant split..."
-				local variantSplitResult = ::variantSplitMgr.detect()
+				local variantSplitResult = preflightVariantSplitResult
 				::_rGCAutoGLBConverter_Main.logVariantSplitResult variantSplitResult postLogs: false
 
 				if (variantSplitResult.isAccepted) do (
-					local variantPolygonIssues = ::_rGCAutoGLBConverter_Main.getVariantPolygonLimitIssues variantSplitResult.clusters
-					if (variantPolygonIssues.count > 0) do (
-						local m = ::preflightMgr.formatIssues variantPolygonIssues title: "Variant polygon preflight failed. Debug conversion stopped."
-						print m
-						SetQuietMode false
-						restoreDebugSourceScene sourceSceneFile
-						messageBox m title: "Debug"
-						return false
-					)
-
 					local autoSplitSourceFile = d + sceneName + "-AUTO-SPLIT-WORKING.max"
 					local autoVariantLayerNames = ::variantSplitMgr.createVariantLayers variantSplitResult prefix: "AUTO-VARIANT"
 					debugLog ("Auto Split intermediate variant layers created: " + (autoVariantLayerNames.count as string))
@@ -7995,15 +8035,6 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 				local sceneStat = ::_rGCAutoGLBConverter_Main.getGeometryPolyStats (geometry as array) label: "Whole scene"
 				debugLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
 				debugLog ("Scene polygon count: " + (::_rGCAutoGLBConverter_Main.formatPolyStats sceneStat))
-				local polygonLimitIssue = ::preflightMgr.getScenePolygonLimitIssue (geometry as array) _MAX_ALLOWED_POLYS label: "Whole scene"
-				if (polygonLimitIssue != undefined) do (
-					local m = ::preflightMgr.formatIssues #(polygonLimitIssue) title: "Polygon preflight failed. Debug conversion stopped."
-					print m
-					SetQuietMode false
-					restoreDebugSourceScene sourceSceneFile
-					messageBox m title: "Debug"
-					return false
-				)
 
 				::_rGCAutoGLBConverter_Main.convertSceneVariant r (sceneName + "-GLB") (sceneName + "-BLEND") (sceneName + "-SKP") d ao blendGLBMgr skpMgr expectedExitFiles convertToBlend: cbxDebugConvertToBlend.checked convertToSketchup: cbxDebugConvertToSketchup.checked postLogs: false
 				if (saveConvertedCompareScene convertedSceneFile) do append convertedSceneFiles convertedSceneFile
