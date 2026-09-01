@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.4.1
+VERSION=1.4.2
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -126,6 +126,11 @@ Auto Converter to GLB/SKP/BLEND script=
 
 [1.4.1]
 - BugFix: Watchdog timeouts report overly complex files as errors before processing the next queue item=
+
+[1.4.2]
++ Added: Exact-case GC- layer names define explicit export variants with sanitized output names=
++ Improved: Explicit variant geometry is isolated and moved to the default layer before export=
++ Improved: Scenes without GC variants move all geometry to the default layer before legacy Auto Split or whole-scene export=
 
 [FILES]
 Install.mcr=
@@ -5810,6 +5815,19 @@ struct DownloadWrapper (
 	)
 )
 
+struct LayerVariantData (
+	layerName,
+	displayName,
+	outputName
+)
+
+struct LayerFlattenResultData (
+	isSuccess,
+	geometryCount,
+	assignedCount,
+	failedCount
+)
+
 rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 	global _MAX_ALLOWED_POLYS = 250000
 
@@ -6236,11 +6254,11 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			local lowerName = toLower (getFilenameFile fileName)
 			local objectKey = substituteString (f as string) "\\" "/"
 
-			if (regex.IsMatch lowerName "-glb(-[0-9]+)?(-webgl)?$") then (
+			if (regex.IsMatch lowerName "-glb(-.+)?(-webgl)?$") then (
 				append glbFiles objectKey
-			) else if (regex.IsMatch lowerName "-blend(-[0-9]+)?$") then (
+			) else if (regex.IsMatch lowerName "-blend(-.+)?$") then (
 				append blendFiles objectKey
-			) else if (regex.IsMatch lowerName "-skp(-[0-9]+)?$") then (
+			) else if (regex.IsMatch lowerName "-skp(-.+)?$") then (
 				append skpFiles objectKey
 			)
 		)
@@ -6307,7 +6325,7 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		for f in expectedExitFiles do (
 			if (toLower (getFilenameType f) == ".png" and doesFileExist f) do (
 				local name = toLower (getFilenameFile f)
-				if (regex.IsMatch name "-glb(-[0-9]+)?$") then (
+				if (regex.IsMatch name "-glb(-.+)?$") then (
 					append images f
 				) else (
 					append fallbackImages f
@@ -6452,6 +6470,69 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		return names
 	)
 
+	fn isExplicitGCLayerName layerName = (
+		if (layerName == undefined) do return false
+		layerName = layerName as string
+		if (layerName.count <= 3) do return false
+		if (not (matchPattern layerName pattern: "GC-*" ignoreCase: false)) do return false
+
+		local variantName = substring layerName 4 (layerName.count - 3)
+		return ((trimLeft (trimRight variantName)) != "")
+	)
+
+	fn getAlphabeticVariantIndex index = (
+		local alphabet = "abcdefghijklmnopqrstuvwxyz"
+		local result = ""
+		if (index < 1) do index = 1
+
+		while (index > 0) do (
+			local remainder = mod (index - 1) 26
+			result = (substring alphabet (remainder + 1) 1) + result
+			index = floor ((index - 1) / 26.0)
+		)
+
+		return result
+	)
+
+	fn normalizeVariantName rawName fallbackIndex = (
+		local regex = dotNetClass "System.Text.RegularExpressions.Regex"
+		local result = regex.Replace (rawName as string) "[^A-Za-z\\s]" ""
+		result = regex.Replace result "\\s+" "_"
+		result = regex.Replace result "_+" "_"
+		result = regex.Replace result "^_+|_+$" ""
+		result = toLower result
+		if (result == "") do result = "variant" + (getAlphabeticVariantIndex fallbackIndex)
+		return result
+	)
+
+	fn getExplicitGCLayerVariants layerNames = (
+		local variants = #()
+		local usedOutputNames = #()
+
+		for layerName in layerNames where (isExplicitGCLayerName layerName) do (
+			local variantIndex = variants.count + 1
+			local rawName = substring layerName 4 (layerName.count - 3)
+			local normalizedName = normalizeVariantName rawName variantIndex
+			local uniqueName = normalizedName
+			local duplicateIndex = 1
+
+			while ((findItem usedOutputNames uniqueName) > 0) do (
+				uniqueName = normalizedName + (getAlphabeticVariantIndex duplicateIndex)
+				duplicateIndex += 1
+			)
+
+			append usedOutputNames uniqueName
+			append variants (LayerVariantData layerName: layerName displayName: uniqueName outputName: uniqueName)
+		)
+
+		return variants
+	)
+
+	fn getLayerVariantMode explicitVariants = (
+		if (explicitVariants.count > 0) do return #explicit_gc
+		return #legacy_auto_split
+	)
+
 	fn getGeometryPolyStats nodes label: "" = (
 		return ::preflightMgr.getGeometryPolyStats nodes label: label
 	)
@@ -6468,13 +6549,33 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		return ::preflightMgr.formatPolyStatsList stats
 	)
 
-	fn logLayerPolyStats layerNames = (
+	fn getLayerVariantPolyStat variant = (
+		local stat = getGeometryLayerPolyStats variant.layerName
+		stat[1] = variant.displayName
+		return stat
+	)
+
+	fn logLayerVariantPolyStats variants = (
 		postProcessLog ("Polygon limit per exported variant: " + (_MAX_ALLOWED_POLYS as string))
 
-		for layerName in layerNames do (
-			local stat = getGeometryLayerPolyStats layerName
+		for variant in variants do (
+			local stat = getLayerVariantPolyStat variant
 			postProcessLog ("Layer polygon count: " + (formatPolyStats stat))
 		)
+	)
+
+	fn getLayerVariantPolygonLimitIssues variants = (
+		local issues = #()
+
+		for variant in variants do (
+			local stat = getLayerVariantPolyStat variant
+			if (stat[2] > _MAX_ALLOWED_POLYS) do (
+				local issue = ::preflightMgr.makePolygonLimitIssue stat _MAX_ALLOWED_POLYS "Explicit variant polygon limit exceeded"
+				::preflightMgr.appendUniqueIssue issues issue
+			)
+		)
+
+		return issues
 	)
 
 	fn getLayersOverPolyLimit layerNames = (
@@ -6521,6 +6622,32 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		if (nodesToDelete.count > 0) do try (delete nodesToDelete) catch ()
 		return (geometry as array).count
+	)
+
+	fn flattenGeometryToDefaultLayer = (
+		local result = LayerFlattenResultData isSuccess: false geometryCount: 0 assignedCount: 0 failedCount: 0
+		local defaultLayer = try (LayerManager.getLayer 0) catch (undefined)
+		if (defaultLayer == undefined) do return result
+
+		for nodeValue in geometry where isValidNode nodeValue and not isDeleted nodeValue do (
+			result.geometryCount += 1
+			local isAssigned = false
+
+			try (
+				defaultLayer.addNode nodeValue
+				isAssigned = true
+			) catch (
+				try (
+					nodeValue.layer = defaultLayer
+					isAssigned = true
+				) catch ()
+			)
+
+			if (isAssigned) then result.assignedCount += 1 else result.failedCount += 1
+		)
+
+		result.isSuccess = result.failedCount == 0
+		return result
 	)
 
 	fn resetLoadedSceneState = (
@@ -6813,8 +6940,10 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		)
 
 		local expectedExitFiles = #()
-		local layerNames = getGeometryLayerNames()
-		local splitByLayers = layerNames.count > 1
+		local geometryLayerNames = getGeometryLayerNames()
+		local layerVariants = getExplicitGCLayerVariants geometryLayerNames
+		local layerVariantMode = getLayerVariantMode layerVariants
+		local splitByLayers = layerVariantMode == #explicit_gc
 		local sourceSceneFile = maxFilePath + maxFileName
 		local sourceTextureRoot = getFilenamePath sourceSceneFile
 		local archiveTextureRoot = (getFilenamePath file) + (getFilenameFile file) + @"\"
@@ -6822,11 +6951,11 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		
 		if (splitByLayers and doesFileExist sourceSceneFile) then (
 			try (watchdogMgr.beat stage: "checking_layers") catch()
-			postProcessLog ("Scene has " + (layerNames.count as string) + " layers with objects. Converting each layer separately.")
-			logLayerPolyStats layerNames
+			postProcessLog ("Scene has " + (layerVariants.count as string) + " explicit GC variant layers. Converting each variant separately.")
+			logLayerVariantPolyStats layerVariants
 
 			try (watchdogMgr.beat stage: "checking_polygons") catch()
-			local polygonLimitIssues = ::preflightMgr.getLayerPolygonLimitIssues layerNames _MAX_ALLOWED_POLYS
+			local polygonLimitIssues = getLayerVariantPolygonLimitIssues layerVariants
 			if (polygonLimitIssues.count > 0) do (
 				local errorReport = ::preflightMgr.formatIssues polygonLimitIssues title: "Polygon preflight failed. Conversion stopped."
 				local shortError = "Layer polygon limit exceeded. Conversion stopped. Check conversion log for details."
@@ -6836,15 +6965,17 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 			r.del = false
 
-			for i in 1 to layerNames.count do (
-				local layerName = layerNames[i]
-				local suffix = "-" + (i as string)
+			for i in 1 to layerVariants.count do (
+				local layerVariant = layerVariants[i]
+				local layerName = layerVariant.layerName
+				local variantName = layerVariant.displayName
+				local suffix = "-" + layerVariant.outputName
 				local glbName = outputBaseName + "-GLB" + suffix
 				local blendName = outputBaseName + "-BLEND" + suffix
 				local skpName = outputBaseName + "-SKP" + suffix
 
-				lblStatus.caption = "Loading layer " + (i as string) + " of " + (layerNames.count as string) + "..."
-				postProcessLog ("Loading source scene for layer " + (i as string) + ": " + layerName)
+				lblStatus.caption = "Loading variant " + variantName + " (" + (i as string) + " of " + (layerVariants.count as string) + ")..."
+				postProcessLog ("Loading source scene for variant " + variantName + ".")
 				try (watchdogMgr.beat stage: ("loading_layer_" + (i as string))) catch()
 				loadMaxFile sourceSceneFile quiet: true
 				::API_BATCH_GLB_CONVERTER.relinkSceneTextures #(archiveTextureRoot, sourceTextureRoot)
@@ -6852,9 +6983,15 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 				local objectsCount = keepOnlyGeometryFromLayer layerName
 				if (objectsCount == 0) then (
-					postProcessLog ("[Warning] Layer has no geometry after reload. Skipping layer: " + layerName)
+					postProcessLog ("[Warning] Explicit variant has no geometry after reload. Skipping variant: " + variantName)
 				) else (
-					postProcessLog ("Converting layer " + (i as string) + " of " + (layerNames.count as string) + ": " + layerName)
+					local flattenResult = flattenGeometryToDefaultLayer()
+					if (not flattenResult.isSuccess) do (
+						local flattenError = "Cannot prepare variant " + variantName + " for conversion. Failed to move " + (flattenResult.failedCount as string) + " of " + (flattenResult.geometryCount as string) + " geometry objects to the default layer."
+						return failCurrentProcess slug source_original_name flattenError statusCaption: ("Cannot flatten variant " + variantName + ". Skipping file.") expectedExitFiles: expectedExitFiles
+					)
+					postProcessLog ("Moved variant " + variantName + " geometry to the default layer for export.")
+					postProcessLog ("Converting variant " + variantName + " (" + (i as string) + " of " + (layerVariants.count as string) + ").")
 					try (watchdogMgr.beat stage: ("converting_layer_" + (i as string))) catch()
 					convertSceneVariant r glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles
 				)
@@ -6863,11 +7000,22 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 			if (sourceDeleteDir != undefined) do ::API_BATCH_GLB_CONVERTER.rmDir sourceDeleteDir
 		) else (
 			if (splitByLayers and not doesFileExist sourceSceneFile) do (
-				postProcessLog "[Warning] Multiple layers were detected, but the source scene file could not be reloaded. Converting the whole scene."
+				local reloadError = "Explicit GC variant layers were detected, but the source scene file could not be reloaded. Conversion stopped to avoid exporting non-variant geometry."
+				return failCurrentProcess slug source_original_name reloadError statusCaption: "Cannot reload source scene. Skipping file."
 			)
 
 			local isAutoSplitConverted = false
-			if ((not splitByLayers) and isAutoSplitVariantsEnabled()) do (
+			if (layerVariantMode == #legacy_auto_split) do (
+				try (watchdogMgr.beat stage: "flattening_geometry_layers") catch()
+				local flattenResult = flattenGeometryToDefaultLayer()
+				if (not flattenResult.isSuccess) do (
+					local flattenError = "Cannot prepare scene layers for conversion. Failed to move " + (flattenResult.failedCount as string) + " of " + (flattenResult.geometryCount as string) + " geometry objects to the default layer."
+					return failCurrentProcess slug source_original_name flattenError statusCaption: "Cannot flatten scene layers. Skipping file."
+				)
+				postProcessLog ("Flattened " + (flattenResult.assignedCount as string) + " geometry objects from all scene layers into the default layer.")
+			)
+
+			if (layerVariantMode == #legacy_auto_split and isAutoSplitVariantsEnabled()) do (
 				try (watchdogMgr.beat stage: "auto_split_variants") catch()
 				postProcessLog "Layer split was not applied. Checking automatic variant split..."
 				local variantSplitResult = ::variantSplitMgr.detect()
@@ -7713,17 +7861,19 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 			return false
 		)
 
-		local layerNames = ::_rGCAutoGLBConverter_Main.getGeometryLayerNames()
-		local splitByLayers = layerNames.count > 1
+		local geometryLayerNames = ::_rGCAutoGLBConverter_Main.getGeometryLayerNames()
+		local layerVariants = ::_rGCAutoGLBConverter_Main.getExplicitGCLayerVariants geometryLayerNames
+		local layerVariantMode = ::_rGCAutoGLBConverter_Main.getLayerVariantMode layerVariants
+		local splitByLayers = layerVariantMode == #explicit_gc
 
 		if (splitByLayers) then (
-			debugLog ("Scene has " + (layerNames.count as string) + " layers with objects. Converting each layer separately.")
-			for layerName in layerNames do (
-				local stat = ::_rGCAutoGLBConverter_Main.getGeometryLayerPolyStats layerName
+			debugLog ("Scene has " + (layerVariants.count as string) + " explicit GC variant layers. Converting each variant separately.")
+			for layerVariant in layerVariants do (
+				local stat = ::_rGCAutoGLBConverter_Main.getLayerVariantPolyStat layerVariant
 				debugLog ("Layer polygon count: " + (::_rGCAutoGLBConverter_Main.formatPolyStats stat))
 			)
 
-			local polygonLimitIssues = ::preflightMgr.getLayerPolygonLimitIssues layerNames _MAX_ALLOWED_POLYS
+			local polygonLimitIssues = ::_rGCAutoGLBConverter_Main.getLayerVariantPolygonLimitIssues layerVariants
 			if (polygonLimitIssues.count > 0) do (
 				local m = ::preflightMgr.formatIssues polygonLimitIssues title: "Polygon preflight failed. Debug conversion stopped."
 				print m
@@ -7733,24 +7883,36 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 				return false
 			)
 
-			for i in 1 to layerNames.count do (
-				local layerName = layerNames[i]
-				local suffix = "-" + (i as string)
+			for i in 1 to layerVariants.count do (
+				local layerVariant = layerVariants[i]
+				local layerName = layerVariant.layerName
+				local variantName = layerVariant.displayName
+				local suffix = "-" + layerVariant.outputName
 				local glbName = sceneName + "-GLB" + suffix
 				local blendName = sceneName + "-BLEND" + suffix
 				local skpName = sceneName + "-SKP" + suffix
 				local layerCompareScene = d + glbName + ".max"
 
-				debugLog ("Loading source scene for layer " + (i as string) + ": " + layerName)
+				debugLog ("Loading source scene for variant " + variantName + ".")
 				loadMaxFile workingSceneFile quiet: true
 				::API_BATCH_GLB_CONVERTER.relinkSceneTextures #(getFilenamePath workingSceneFile)
 				::_rGCAutoGLBConverter_Main.resetLoadedSceneState()
 
 				local objectsCount = ::_rGCAutoGLBConverter_Main.keepOnlyGeometryFromLayer layerName
 				if (objectsCount == 0) then (
-					debugLog ("Layer has no geometry after reload. Skipping layer: " + layerName)
+					debugLog ("Explicit variant has no geometry after reload. Skipping variant: " + variantName)
 				) else (
-					debugLog ("Converting layer " + (i as string) + " of " + (layerNames.count as string) + ": " + layerName)
+					local flattenResult = ::_rGCAutoGLBConverter_Main.flattenGeometryToDefaultLayer()
+					if (not flattenResult.isSuccess) do (
+						local flattenError = "Cannot prepare variant " + variantName + " for conversion. Failed to move " + (flattenResult.failedCount as string) + " of " + (flattenResult.geometryCount as string) + " geometry objects to the default layer."
+						debugLog flattenError
+						SetQuietMode false
+						restoreDebugSourceScene sourceSceneFile
+						messageBox flattenError title: "Debug"
+						return false
+					)
+					debugLog ("Moved variant " + variantName + " geometry to the default layer for export.")
+					debugLog ("Converting variant " + variantName + " (" + (i as string) + " of " + (layerVariants.count as string) + ").")
 					::_rGCAutoGLBConverter_Main.convertSceneVariant r glbName blendName skpName d ao blendGLBMgr skpMgr expectedExitFiles convertToBlend: cbxDebugConvertToBlend.checked convertToSketchup: cbxDebugConvertToSketchup.checked postLogs: false
 					if (saveConvertedCompareScene layerCompareScene) do append convertedSceneFiles layerCompareScene
 				)
@@ -7759,7 +7921,20 @@ rollout _rGCAutoGLBConverter_Debug "Debug" category: 4 (
 			try (saveConvertedCompareScene convertedSceneFile) catch ()
 		) else (
 			local isAutoSplitConverted = false
-			if (::_rGCAutoGLBConverter_Main.isAutoSplitVariantsEnabled()) do (
+			if (layerVariantMode == #legacy_auto_split) do (
+				local flattenResult = ::_rGCAutoGLBConverter_Main.flattenGeometryToDefaultLayer()
+				if (not flattenResult.isSuccess) do (
+					local flattenError = "Cannot prepare scene layers for conversion. Failed to move " + (flattenResult.failedCount as string) + " of " + (flattenResult.geometryCount as string) + " geometry objects to the default layer."
+					debugLog flattenError
+					SetQuietMode false
+					restoreDebugSourceScene sourceSceneFile
+					messageBox flattenError title: "Debug"
+					return false
+				)
+				debugLog ("Flattened " + (flattenResult.assignedCount as string) + " geometry objects from all scene layers into the default layer.")
+			)
+
+			if (layerVariantMode == #legacy_auto_split and ::_rGCAutoGLBConverter_Main.isAutoSplitVariantsEnabled()) do (
 				debugLog "Layer split was not applied. Checking automatic variant split..."
 				local variantSplitResult = ::variantSplitMgr.detect()
 				::_rGCAutoGLBConverter_Main.logVariantSplitResult variantSplitResult postLogs: false
