@@ -1,7 +1,7 @@
 /*
 [INFO]
 NAME=GC Autoconverter GLB
-VERSION=1.4.3
+VERSION=1.4.4
 AUTHOR=Vasyl Lukianenko
 DEV=https://3dground.net
 HELP=
@@ -135,6 +135,10 @@ Auto Converter to GLB/SKP/BLEND script=
 [1.4.3]
 + Improved: Full-scene preflight collects all existing validation errors before conversion starts=
 + Improved: Validation findings are deduplicated, deterministically ordered and sent in one complete error report=
+
+[1.4.4]
+- BugFix: Watchdog timeout errors are reported before queue retrieval, including when the queue is empty=
++ Improved: Watchdog timeout logs and error statuses explicitly target the failed autoconversion AID=
 
 [FILES]
 Install.mcr=
@@ -868,7 +872,7 @@ struct requestWrapper (
 	fn getQueue = (
 		return this.downloadString apiGetQueue
 	),
-	fn postStatus status txt: "" result_json: undefined = (
+	fn postStatus status txt: "" result_json: undefined autoconvertionId: undefined = (
 		local s = case status of (
 			#in_progress: status as string
 			#downloaded: status as string
@@ -880,9 +884,10 @@ struct requestWrapper (
 		)
 
 		if (s == #none) do return false
+		local targetAId = if (autoconvertionId == undefined) then a_id else autoconvertionId
 
 		local data = #(
-			#("autoconvertion_id", a_id),
+			#("autoconvertion_id", targetAId),
 			#("status_id", s),
 			#("txt", txt)
 		)
@@ -901,11 +906,12 @@ struct requestWrapper (
 
 		return this.post apiPostStatus data
 	),
-	fn postLog txt: "" = (
+	fn postLog txt: "" autoconvertionId: undefined = (
 		if (txt == "") do return false
+		local targetAId = if (autoconvertionId == undefined) then a_id else autoconvertionId
 
 		local data = #(
-			#("autoconvertion_id", a_id),
+			#("autoconvertion_id", targetAId),
 			#("txt", txt)
 		)
 		return this.post apiPostLog data
@@ -6487,11 +6493,8 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 
 		local errorMessage = "The file is too complex to process within the allowed time. Please simplify the file and try again."
 
-		local currentAId = requestMgr.a_id
-		requestMgr.a_id = timeoutData.a_id
-		requestMgr.postLog txt: ("[Error] " + errorMessage)
-		local isErrorReported = requestMgr.postStatus #error txt: errorMessage
-		requestMgr.a_id = currentAId
+		requestMgr.postLog txt: ("[Error] " + errorMessage) autoconvertionId: timeoutData.a_id
+		local isErrorReported = requestMgr.postStatus #error txt: errorMessage autoconvertionId: timeoutData.a_id
 
 		if (isErrorReported) then (
 			watchdogMgr.markPendingErrorReported()
@@ -6839,15 +6842,20 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local credentialsModeLabel = getCredentialsModeLabel credentialsMode
 		applyCredentialProfile credentialsMode
 
-		local isAwsCredentialsError = awsUploaderMgr.checkCredentialsError()
-		if (isAwsCredentialsError) do (
-			messageBox (credentialsModeLabel + " AWS S3 credentials are missing or invalid. Check the settings and try again.") title: "Error!"
-			return false
-		)
-
 		local isRequestCredentialsError = requestMgr.checkCredentialsError()
 		if (isRequestCredentialsError) do (
 			messageBox (credentialsModeLabel + " Web API credentials are missing or invalid. Check the settings and try again.") title: "Error!"
+			return false
+		)
+
+		if (not reportPendingWatchdogError()) do (
+			restartProcessFiles msg: "Cannot report the previous watchdog timeout. Retrying in"
+			return false
+		)
+
+		local isAwsCredentialsError = awsUploaderMgr.checkCredentialsError()
+		if (isAwsCredentialsError) do (
+			messageBox (credentialsModeLabel + " AWS S3 credentials are missing or invalid. Check the settings and try again.") title: "Error!"
 			return false
 		)
 
@@ -6911,11 +6919,6 @@ rollout _rGCAutoGLBConverter_Main "Main" category: 1 (
 		local source_original_name = jr.getString "source_original_name"
 		local count_total = jr.getInt "count_total"
 		local outputBaseName = a_id
-
-		if (not reportPendingWatchdogError()) do (
-			restartProcessFiles msg: "Cannot report the previous watchdog timeout. Retrying in"
-			return false
-		)
 
 		requestMgr.a_id = a_id
 		requestMgr.model_id = model_id
