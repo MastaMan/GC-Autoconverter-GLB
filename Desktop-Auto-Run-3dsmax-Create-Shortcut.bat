@@ -1,6 +1,9 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
+:: Child Max and restart helpers leave relaunching to this runner.
+set "GC_GLB_DESKTOP_RUNNER=1"
+
 set MAX_PATH=C:\Program Files\Autodesk\3ds Max 2025\
 set MAX_EXE=%MAX_PATH%3dsmax.exe
 set MAX_SENDDMP=%MAX_PATH%senddmp.exe

@@ -18,6 +18,9 @@ for /f "tokens=1,2 delims=;" %%i in (%input%) do (
 	set adv=%%j
 )
 
+:: Desktop runner is the sole launch owner when it started this session.
+if "%GC_GLB_DESKTOP_RUNNER%"=="1" set "adv=dontrun"
+
 taskkill /F /IM 3dsmax.exe
 
 :: 10sec pause
